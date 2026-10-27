@@ -17,6 +17,9 @@ GPIO 35 (LEFT / -) is input-only with no internal pull-up - it needs the externa
 Two connections are soldered straight to the ESP32-WROOM-32 module (not on any header):
   - GROUND: top-right pin of the module, next to the antenna shield.
   - GPIO 25 (PWM out to the MOSFET's TRIG/PWM pin): 5th pin up from the bottom-left corner.
+Case logo backlight (3 x 5V addressable LEDs): data on GPIO 23 - SD card socket pin 3 (CMD),
+the leg on the far side of the 3.3V leg from CLK. Keep the SD slot empty. 5V + GND from the step-down.
+See LOGO_* in DEFINES. Touch is not used - GPIO 25 / 32 / 33 are free for outputs.
 --------------------------------------------------------------------------------------------------
 
 --- LOOK (change these in VARIABLES - one theme per mode) ---
@@ -81,6 +84,7 @@ Needs LOAD_GFXFF enabled in TFT_eSPI's User_Setup.h (for the bold FreeSansBold l
 #include <TFT_eSPI.h>     // Copy this repo's User_Setup.h into the TFT_eSPI library folder (see README).
 #include <WiFi.h>         // Required for ESP-NOW - puts the radio in STA mode, no actual WiFi connection is made.
 #include <esp_now.h>      // ESP-NOW: multi-device sync between battens.
+#include <FastLED.h>       // Case logo backlight (install "FastLED" 3.9+ from the Library Manager)
 
 //------------------------------------------  DEFINES  --------------------------------------------
 
@@ -128,6 +132,14 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 #define LED_PWM_PIN     25  // Soldered direct to the module - see hardware note at top of file
 #define PWM_FREQ        5000
 #define PWM_RESOLUTION  8  // 0-255
+
+// --- Case logo backlight (3 x 5V addressable LEDs, e.g. WS2812B) ---
+// Wiring: LED 5V + GND from the 5V step-down, data in -> LOGO_LED_PIN. Brightness + colours are in VARIABLES.
+#define LOGO_LEDS_ENABLED  true                    // false = no logo LEDs fitted
+#define LOGO_LED_PIN       23                      // SD socket pin 3 (CMD) - keep the SD slot empty. Alt: 18, 32, 33
+#define LOGO_LED_COUNT     3
+#define LOGO_LED_CHIPSET   WS2812B                 // FastLED chipset name (e.g. WS2812B, SK6812)
+#define LOGO_COLOR_ORDER   GRB                     // If red/green come out swapped, try RGB
 
 // --- Chase animation (each unit pulses in turn: Host first, then each Client in name order) ---
 #define CHASE_PEAK_PERCENT   50     // Brightness at the top of each pulse
@@ -471,6 +483,11 @@ const char *popupTitle = "";
 String popupBody;
 String popupWarning;
 
+// --- Case logo backlight: one fixed colour per LED (0xRRGGBB), LED 1 is the first on the data line ---
+uint8_t  logoBrightnessPercent = 50;                                      // 0 = off ... 100 = full
+uint32_t logoColours[LOGO_LED_COUNT] = { 0xFF0000, 0x00FF00, 0x0000FF }; // 1 = red, 2 = green, 3 = blue
+CRGB logoLeds[LOGO_LED_COUNT];
+
 // --- Sprites ---
 TFT_eSprite menuSpr = TFT_eSprite(&tft);  // One menu row (plus its glow) at a time, then pushed - no flicker
 TFT_eSprite infoSpr = TFT_eSprite(&tft);  // Info box (plus its glow) - drawn here so fades don't flicker
@@ -503,8 +520,10 @@ void setup() {
     tempBrightness = brightnessPercent;
   }
 
-  // Configure ESP32 LEDC (PWM) - done first so the light is at its boot level before the slower display/radio init
-  ledcAttach(LED_PWM_PIN, PWM_FREQ, PWM_RESOLUTION); 
+  setupLogoLeds(); // Case logo backlight on first - before the battens
+
+  // Configure ESP32 LEDC (PWM) - before the slower display/radio init, so the battens are at their boot level early
+  ledcAttach(LED_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
   ledcWrite(LED_PWM_PIN, brightnessToPWM(brightnessPercent)); // 0% on boot, or 50% if LEFT held
 
   delay(200);
@@ -779,6 +798,19 @@ void applyTheme(DeviceMode mode) {
   backgroundColor = tft.alphaBlend((uint8_t)((pct * 255) / 100), t.background, TFT_BLACK);
   glowColor       = t.glow;
   glowIntensity   = t.glowIntensity;
+}
+
+//------------------------------------------------------------------- CASE LOGO BACKLIGHT
+
+// Lights the 3 logo LEDs in their fixed colours (logoColours) and leaves them on.
+// Not affected by screen sleep or the batten brightness.
+void setupLogoLeds() {
+  if (!LOGO_LEDS_ENABLED) return;
+  uint8_t pct = (logoBrightnessPercent > 100) ? 100 : logoBrightnessPercent;
+  FastLED.addLeds<LOGO_LED_CHIPSET, LOGO_LED_PIN, LOGO_COLOR_ORDER>(logoLeds, LOGO_LED_COUNT);
+  FastLED.setBrightness((uint8_t)((pct * 255) / 100));
+  for (int i = 0; i < LOGO_LED_COUNT; i++) logoLeds[i] = logoColours[i];
+  FastLED.show();
 }
 
 //------------------------------------------------------------------- MODE + NAMES
