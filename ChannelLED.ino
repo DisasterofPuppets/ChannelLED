@@ -136,12 +136,12 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 
 // --- PWM config (ESP32 Arduino core v3.x API) ---
 #define LED_PWM_PIN     25  // Soldered direct to the module - see hardware note at top of file
-#define PWM_FREQ        5000 // 5000
+#define PWM_FREQ        20000  // 20kHz - above most people's hearing. XY-MOS modules are rated up to 20kHz was 5000 but loud sound when lights turned on.
 #define PWM_RESOLUTION  8  // 0-255
 
 // --- Case logo backlight (3 plain LEDs switched by an IRLB8721 MOSFET - see hardware note) ---
 #define LOGO_PWM_PIN         23     // MOSFET Gate (via 220 ohm). SD socket pin 3 (CMD) - keep the SD slot empty
-#define LOGO_PWM_FREQ        5000   // Hz - same as the battens, flicker-free
+#define LOGO_PWM_FREQ        20000   // Hz - same as the battens, flicker-free
 #define LOGO_PWM_RESOLUTION  8      // 0-255
 #define LOGO_UPDATE_MS       20     // How often the Breathe fade is recalculated (~50 steps a second)
 
