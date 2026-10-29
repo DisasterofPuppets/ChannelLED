@@ -17,9 +17,10 @@ GPIO 35 (LEFT / -) is input-only with no internal pull-up - it needs the externa
 Two connections are soldered straight to the ESP32-WROOM-32 module (not on any header):
   - GROUND: top-right pin of the module, next to the antenna shield.
   - GPIO 25 (PWM out to the MOSFET's TRIG/PWM pin): 5th pin up from the bottom-left corner.
-Case logo backlight (3 x 5V addressable LEDs): data on GPIO 23 - SD card socket pin 3 (CMD),
-the leg on the far side of the 3.3V leg from CLK. Keep the SD slot empty. 5V + GND from the step-down.
-See LOGO_* in DEFINES. Touch is not used - GPIO 25 / 32 / 33 are free for outputs.
+Case logo backlight: 3 plain LEDs (red / green / blue), each 5V -> resistor (150 / 220 / 220 ohm) -> LED,
+all LED cathodes -> IRLB8721 N-channel MOSFET Drain, Source -> GND.
+Gate <- 220 ohm <- GPIO 23 (SD card socket pin 3 (CMD) - keep the SD slot empty), plus 10k Gate -> GND.
+See LOGO_* in DEFINES and VARIABLES. Touch is not used - GPIO 32 / 33 are free for outputs (25 = batten PWM).
 --------------------------------------------------------------------------------------------------
 
 --- LOOK (change these in VARIABLES - one theme per mode) ---
@@ -29,16 +30,16 @@ See LOGO_* in DEFINES. Touch is not used - GPIO 25 / 32 / 33 are free for output
     glow                 colour of frames, highlights and icons (RGB565)
     glowIntensity        0 = no glow ... 100 = strongest glow
   Host = blue, Client = green, Standalone = orange. The boot screen uses the Host theme.
-  While the Switch Mode popup is open the theme stays as it was - it switches when the popup closes.
+  While the Config menu is open the theme stays as it was - it switches when the menu closes.
   Text: titles white (MENU_COL_TEXT), everything else grey (MENU_COL_BODY). Only the logo is bold.
 
 --- MODES (not remembered - every power-on searches again) ---
   H  Host        H_ConnectLED          Leads the group - every Client follows it. Only one per group.
   C  Client      C_ConnectLED_<num>    Follows the Host. Reconnects automatically if the Host drops out.
-                                       View-only: compact rows show the Host's values - only Switch Mode works.
+                                       View-only: compact rows show the Host's values - only the Config menu works.
   S  Standalone  SA_ConnectLED_<num>   Runs on its own, ignores the Host.
   On power-on: joins a Host if it hears one, otherwise becomes Host. Enter skips to Standalone.
-  Mode changes from the Switch Mode popup last until power-off.
+  Mode changes from the Config menu last until power-off.
 
 --- STATUS ICONS (top-right) ---
   Link:  GREEN chain = Connected   YELLOW broken chain (blinking) = Retrying   (none when Standalone)
@@ -54,24 +55,30 @@ See LOGO_* in DEFINES. Touch is not used - GPIO 25 / 32 / 33 are free for output
   - / +                          -> move between items, or change a value while editing
   OK (short press, on release)   -> start / confirm editing the highlighted item
 
---- BUTTON SHORTCUTS (HOLD) ---   (Client: only Switch Mode)
+--- BUTTON SHORTCUTS (HOLD) ---   (Client: only the Config menu)
   50% Brightness (no animation)  -> hold - & + (1s), release
   All Off                        -> hold - & + & OK (1s)
-  Switch Mode popup              -> hold OK (1s), release  (same again to cancel)
+  Config menu                    -> hold OK (1s), release  (same again to cancel)
   LEFT (-) held on boot          -> LED starts at 50% brightness immediately
   Enter (OK) during boot search  -> skip the search, run Standalone
 None of the button pins (35, 22, 27) are ESP32 boot strapping pins, so holding them at
 power-on can't stop the board booting.
 
---- SWITCH MODE POPUP ---
-  - / +  pick the New Mode   ->   OK moves to Update   ->   OK applies
-  On the buttons: + moves Update -> Cancel, - moves back (Cancel -> Update -> New Mode)
+--- CONFIG MENU (hold OK) ---
+  Mode:  - / + pick Host / Client / Standalone (leave it on the current mode for no change)  -> OK moves on
+  Logo:  - / + pick Off / Steady / Breathe (Client: locked - follows the Host)               -> OK moves on
+  Update: OK applies.  + moves Update -> Cancel, - moves back (Cancel -> Update -> Logo)
   Cancel (or holding OK) returns to the main menu with nothing changed.
+
+--- CASE LOGO BACKLIGHT ---
+  Off / Steady / Breathe, set in the Config menu. The Host's choice is copied to every Client.
+  Keeps running through screen sleep, and isn't touched by the batten brightness or All Off.
+  Power-on default, Steady level and Breathe levels / speed: LOGO_* in VARIABLES.
 
 --- INFO BOX (under the menu) ---
   Fades between "Button Shortcuts (Hold)" and the icon "Key" every INFO_CYCLE_MS.
-  Paused while the Switch Mode popup is open or a notification is showing.
-  Client: one fixed, taller box instead - "Controlled by Host", Switch Mode (Hold OK) and the Key.
+  Paused while the Config menu is open or a notification is showing.
+  Client: one fixed, taller box instead - "Controlled by Host", Config Menu (Hold OK) and the Key.
 
 You may see the below warning, but can safely ignore it - the CYD is used as a display only, touch is disabled.
   #warning >>>>------>> TOUCH_CS pin not defined, TFT_eSPI touch functions will not be available!
@@ -84,7 +91,6 @@ Needs LOAD_GFXFF enabled in TFT_eSPI's User_Setup.h (for the bold FreeSansBold l
 #include <TFT_eSPI.h>     // Copy this repo's User_Setup.h into the TFT_eSPI library folder (see README).
 #include <WiFi.h>         // Required for ESP-NOW - puts the radio in STA mode, no actual WiFi connection is made.
 #include <esp_now.h>      // ESP-NOW: multi-device sync between battens.
-#include <FastLED.h>       // Case logo backlight (install "FastLED" 3.9+ from the Library Manager)
 
 //------------------------------------------  DEFINES  --------------------------------------------
 
@@ -120,7 +126,7 @@ const int RAMP_STEP_STAGE3 = 20; // step size once held >= STAGE3
 #define DEVICE_NUMBER      "01"
 
 const unsigned long HOST_SEARCH_WINDOW_MS     = 10000; // Power-on search for an existing Host
-const unsigned long HOST_CHECK_MS             = 3500;  // Quick "is there a Host?" check (Switch Mode popup)
+const unsigned long HOST_CHECK_MS             = 3500;  // Quick "is there a Host?" check (Config menu)
 const unsigned long HOST_QUERY_INTERVAL_MS    = 1000;  // How often a searching unit asks "any Host out there?"
 const unsigned long HOST_ANNOUNCE_INTERVAL_MS = 3000;  // How often a Host broadcasts a keep-alive
 const unsigned long HOST_HEARTBEAT_TIMEOUT_MS = 15000; // A Client starts reconnecting after this long with no contact
@@ -130,16 +136,14 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 
 // --- PWM config (ESP32 Arduino core v3.x API) ---
 #define LED_PWM_PIN     25  // Soldered direct to the module - see hardware note at top of file
-#define PWM_FREQ        5000
+#define PWM_FREQ        5000 // 5000
 #define PWM_RESOLUTION  8  // 0-255
 
-// --- Case logo backlight (3 x 5V addressable LEDs, e.g. WS2812B) ---
-// Wiring: LED 5V + GND from the 5V step-down, data in -> LOGO_LED_PIN. Brightness + colours are in VARIABLES.
-#define LOGO_LEDS_ENABLED  true                    // false = no logo LEDs fitted
-#define LOGO_LED_PIN       23                      // SD socket pin 3 (CMD) - keep the SD slot empty. Alt: 18, 32, 33
-#define LOGO_LED_COUNT     3
-#define LOGO_LED_CHIPSET   WS2812B                 // FastLED chipset name (e.g. WS2812B, SK6812)
-#define LOGO_COLOR_ORDER   GRB                     // If red/green come out swapped, try RGB
+// --- Case logo backlight (3 plain LEDs switched by an IRLB8721 MOSFET - see hardware note) ---
+#define LOGO_PWM_PIN         23     // MOSFET Gate (via 220 ohm). SD socket pin 3 (CMD) - keep the SD slot empty
+#define LOGO_PWM_FREQ        5000   // Hz - same as the battens, flicker-free
+#define LOGO_PWM_RESOLUTION  8      // 0-255
+#define LOGO_UPDATE_MS       20     // How often the Breathe fade is recalculated (~50 steps a second)
 
 // --- Chase animation (each unit pulses in turn: Host first, then each Client in name order) ---
 #define CHASE_PEAK_PERCENT   50     // Brightness at the top of each pulse
@@ -198,7 +202,7 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 #define CLIENT_ROW_H         32    // Row height - title and value on one line, no sliders
 #define CLIENT_INFO_ROW_H    22    // Info box rows below the title
 #define CLIENT_INFO_Y        (MENU_ROW_Y0 + 3 * CLIENT_ROW_H + 2 * MENU_ROW_GAP + 8)
-#define CLIENT_INFO_H        (INFO_TITLE_H + 5 * CLIENT_INFO_ROW_H) // Title + Switch Mode + Key header + 3 key rows
+#define CLIENT_INFO_H        (INFO_TITLE_H + 5 * CLIENT_INFO_ROW_H) // Title + Config Menu + Key header + 3 key rows
 #define CLIENT_LOCK_COL      0xFEA0 // Yellow padlock
 
 // --- Footer bar (Mode on the left, Device on the right) ---
@@ -262,7 +266,7 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 #define STATUS_BLINK_MS      500         // Yellow icon blink rate while retrying
 #define KEY_ICON_SCALE       0.7         // Icons in the Key box are drawn at this size
 
-// --- Switch Mode popup ---
+// --- Config menu (hold OK popup) ---
 #define POP_X            12
 #define POP_Y            44
 #define POP_W            216
@@ -311,8 +315,8 @@ unsigned long downBtnHeldStartTime = 0; // Time RIGHT started being held down
 unsigned long lastUpRampTime = 0;       // Last time LEFT performed a ramp step
 unsigned long lastDownRampTime = 0;     // Last time RIGHT performed a ramp step
 
-// OK acts on release: a short press is a normal OK, a long hold opens the Switch Mode popup
-const unsigned long OK_MODE_HOLD_MS = 1000; // Hold OK (on its own) this long for the Switch Mode popup
+// OK acts on release: a short press is a normal OK, a long hold opens the Config menu
+const unsigned long OK_MODE_HOLD_MS = 1000; // Hold OK (on its own) this long for the Config menu
 bool okPressValid = false;              // This OK press started outside a shortcut - act on release
 unsigned long okHeldSince = 0;          // millis() OK went down
 bool okModeArmed = false;               // OK held long enough - releasing opens (or cancels) the popup
@@ -425,7 +429,7 @@ volatile bool hostHeard = false;
 uint8_t heardHostMac[6] = {0};
 char heardHostName[32] = {0};
 
-// Wire format for ESP-NOW packets. Must stay identical on every device since they
+// Wire format for ESP-NOW packets. Must stay identical on every device (re-flash every unit together) since they
 // all run the same firmware and decode this struct directly from the raw bytes.
 enum EspNowMsgType : uint8_t {
   MSG_ANNOUNCE     = 0,  // Host keep-alive (carries state)
@@ -443,6 +447,7 @@ typedef struct {
   int speedPercent;         // Host state messages only
   char targetName[32];      // MSG_CHASE_PULSE: which Client should pulse
   uint16_t pulseMs;         // MSG_CHASE_PULSE: how long the pulse lasts
+  uint8_t logoMode;         // Host state messages only: LogoMode (Off / Steady / Breathe)
 } EspNowMessage;
 
 // The receive callback runs on the WiFi/LWIP task, not the main loop - TFT/SPI drawing isn't
@@ -471,22 +476,41 @@ bool drawnLinked = false;
 bool statusBlinkOn = true;
 unsigned long lastStatusBlink = 0;
 
-// --- Switch Mode popup state ---
+// --- Config menu (popup) state ---
 enum PopupScreen { POP_SELECT, POP_RESULT, POP_CONFIRM_HOST, POP_HOST_EXISTS };
 bool popupOpen = false;                 // While true, the popup gets every button press
 PopupScreen popupScreen = POP_SELECT;
-uint8_t popupSelectFocus = 0;           // Select screen: 0 = New Mode selector, 1 = Update, 2 = Cancel
-DeviceMode popupNewMode = MODE_CLIENT;  // Option shown under "New Mode"
+// Select screen focus: 0 = Mode selector, 1 = Logo selector, 2 = Update, 3 = Cancel
+#define POP_FOCUS_MODE    0
+#define POP_FOCUS_LOGO    1
+#define POP_FOCUS_UPDATE  2
+#define POP_FOCUS_CANCEL  3
+uint8_t popupSelectFocus = POP_FOCUS_MODE;
+DeviceMode popupNewMode = MODE_CLIENT;  // Option shown in the Mode selector (current mode = no change)
 DeviceMode popupPrevMode = MODE_STANDALONE; // Mode to go back to if "No" is chosen
 bool popupYesSelected = false;          // Yes/No focus on the "No Host found" question
 const char *popupTitle = "";
 String popupBody;
 String popupWarning;
 
-// --- Case logo backlight: one fixed colour per LED (0xRRGGBB), LED 1 is the first on the data line ---
-uint8_t  logoBrightnessPercent = 50;                                      // 0 = off ... 100 = full
-uint32_t logoColours[LOGO_LED_COUNT] = { 0xFF0000, 0x00FF00, 0x0000FF }; // 1 = red, 2 = green, 3 = blue
-CRGB logoLeds[LOGO_LED_COUNT];
+// ===== CASE LOGO BACKLIGHT - change these to suit =====
+// Power-on mode, how bright Steady is, and the Breathe range / speed. Percentages are 0-100.
+// A Client switches to its Host's logo mode as soon as it links.
+enum LogoMode : uint8_t { LOGO_OFF = 0, LOGO_STEADY = 1, LOGO_BREATHE = 2 };
+#define LOGO_MODE_COUNT 3                              // Number of entries in LogoMode - used to wrap the selector
+LogoMode logoMode = LOGO_BREATHE;                      // Power-on default
+const uint8_t LOGO_STEADY_PERCENT          = 60;       // Steady brightness
+const uint8_t LOGO_BREATHE_MIN_PERCENT     = 5;        // Bottom of each breath (0 = fully off)
+const uint8_t LOGO_BREATHE_MAX_PERCENT     = 100;      // Top of each breath
+const unsigned long LOGO_BREATHE_PERIOD_MS = 4000;     // One full breath, in and out
+// ===== (end of logo settings) =====
+
+// Logo runtime state - don't edit these directly
+bool logoReady = false;                  // PWM attached to LOGO_PWM_PIN OK
+unsigned long logoBreatheStart = 0;      // millis() the current breath cycle started
+unsigned long lastLogoUpdate = 0;        // millis() of the last fade step
+int logoLastPwm = -1;                    // Last value written to the pin (-1 = nothing yet)
+LogoMode popupNewLogo = LOGO_BREATHE;    // Option shown in the Config menu's Logo selector
 
 // --- Sprites ---
 TFT_eSprite menuSpr = TFT_eSprite(&tft);  // One menu row (plus its glow) at a time, then pushed - no flicker
@@ -520,7 +544,7 @@ void setup() {
     tempBrightness = brightnessPercent;
   }
 
-  setupLogoLeds(); // Case logo backlight on first - before the battens
+  setupLogo(); // Case logo backlight on first - before the battens
 
   // Configure ESP32 LEDC (PWM) - before the slower display/radio init, so the battens are at their boot level early
   ledcAttach(LED_PWM_PIN, PWM_FREQ, PWM_RESOLUTION);
@@ -618,7 +642,7 @@ void loop() {
   // --- Process OK button ---
   // Acts on release, so it never misfires as part of a shortcut:
   //   short press                -> normal OK (menu / popup)
-  //   held alone OK_MODE_HOLD_MS -> opens the Switch Mode popup (or cancels it if it's open)
+  //   held alone OK_MODE_HOLD_MS -> opens the Config menu (or cancels it if it's open)
   if (readingOk != okBtnRawState) {
     lastOkBtnRawChangeTime = now;
   }
@@ -649,7 +673,7 @@ void loop() {
       (now - okHeldSince >= OK_MODE_HOLD_MS)) {
     okModeArmed = true;
     resetInactivityTimer();
-    drawNotificationText(NOTIFICATION_TEXT_Y, "Release to switch mode");
+    drawNotificationText(NOTIFICATION_TEXT_Y, "Release for Config menu");
   }
 
   // --- Button Shortcuts ---
@@ -802,15 +826,81 @@ void applyTheme(DeviceMode mode) {
 
 //------------------------------------------------------------------- CASE LOGO BACKLIGHT
 
-// Lights the 3 logo LEDs in their fixed colours (logoColours) and leaves them on.
-// Not affected by screen sleep or the batten brightness.
-void setupLogoLeds() {
-  if (!LOGO_LEDS_ENABLED) return;
-  uint8_t pct = (logoBrightnessPercent > 100) ? 100 : logoBrightnessPercent;
-  FastLED.addLeds<LOGO_LED_CHIPSET, LOGO_LED_PIN, LOGO_COLOR_ORDER>(logoLeds, LOGO_LED_COUNT);
-  FastLED.setBrightness((uint8_t)((pct * 255) / 100));
-  for (int i = 0; i < LOGO_LED_COUNT; i++) logoLeds[i] = logoColours[i];
-  FastLED.show();
+// 3 plain LEDs switched by the IRLB8721 MOSFET, PWM on LOGO_PWM_PIN.
+// Runs on its own - not affected by screen sleep, the batten brightness or All Off.
+
+// Attaches the logo PWM. On failure the error is logged and the logo is disabled -
+// the battens, display and sync carry on, so one bad pin can't take the lights down.
+void setupLogo() {
+  // Check the user settings first - a 0 period would divide by zero in runLogo()
+  const char *settingsError = (LOGO_BREATHE_PERIOD_MS == 0)                         ? "LOGO_BREATHE_PERIOD_MS must be above 0."
+                            : (LOGO_BREATHE_MIN_PERCENT > LOGO_BREATHE_MAX_PERCENT) ? "LOGO_BREATHE_MIN_PERCENT must be <= LOGO_BREATHE_MAX_PERCENT."
+                            : (LOGO_BREATHE_MAX_PERCENT > 100 || LOGO_STEADY_PERCENT > 100) ? "Logo percentages must be 0-100."
+                            : nullptr;
+  if (settingsError) {
+    logoReady = false;
+    Serial.println("=========== ERROR LOG ===========");
+    Serial.printf("ERROR: Invalid logo setting in VARIABLES - %s\n", settingsError);
+    Serial.println("Logo backlight disabled. Fix the setting and re-upload.");
+    Serial.println("=================================");
+    return;
+  }
+
+  if (!ledcAttach(LOGO_PWM_PIN, LOGO_PWM_FREQ, LOGO_PWM_RESOLUTION)) {
+    logoReady = false;
+    Serial.println("=========== ERROR LOG ===========");
+    Serial.printf("ERROR: ledcAttach() failed on GPIO %d (case logo backlight).\n", LOGO_PWM_PIN);
+    Serial.println("Cause: pin already in use, or no free PWM channel. Logo backlight disabled.");
+    Serial.println("=================================");
+    return;
+  }
+  logoReady = true;
+  setLogoMode(logoMode); // Start in the power-on default
+  if (Debug) Serial.printf("Logo backlight ready on GPIO %d - %s\n", LOGO_PWM_PIN, getLogoName(logoMode).c_str());
+}
+
+// Converts 0-100% to a PWM value with a simple gamma curve, so the fade looks even to the eye
+int logoPercentToPWM(float percent) {
+  float f = constrain(percent, 0.0f, 100.0f) / 100.0f;
+  return (int)(f * f * ((1 << LOGO_PWM_RESOLUTION) - 1) + 0.5f);
+}
+
+String getLogoName(LogoMode m) {
+  switch (m) {
+    case LOGO_OFF:     return "Off";
+    case LOGO_STEADY:  return "Steady";
+    case LOGO_BREATHE: return "Breathe";
+  }
+  return "";
+}
+
+// Switches the logo mode and applies it straight away (a new breath starts from the bottom)
+void setLogoMode(LogoMode m) {
+  if ((uint8_t)m >= LOGO_MODE_COUNT) return; // Ignore anything out of range (e.g. a corrupt message)
+  logoMode = m;
+  logoBreatheStart = millis();
+  lastLogoUpdate = millis() - LOGO_UPDATE_MS; // Due now
+  runLogo(millis());
+}
+
+// Called from loop() (via runAnimations), during Host searches and during the boot screen.
+// Off / Steady are written once; Breathe is a smooth cosine fade between the min and max levels.
+void runLogo(unsigned long now) {
+  if (!logoReady || now - lastLogoUpdate < LOGO_UPDATE_MS) return;
+  lastLogoUpdate = now;
+
+  int pwm = 0;
+  if (logoMode == LOGO_STEADY) {
+    pwm = logoPercentToPWM(LOGO_STEADY_PERCENT);
+  } else if (logoMode == LOGO_BREATHE) {
+    float phase = (float)((now - logoBreatheStart) % LOGO_BREATHE_PERIOD_MS) / LOGO_BREATHE_PERIOD_MS;
+    float level = (1.0f - cos(2.0f * PI * phase)) / 2.0f; // 0 -> 1 -> 0 over one period
+    pwm = logoPercentToPWM(LOGO_BREATHE_MIN_PERCENT + (LOGO_BREATHE_MAX_PERCENT - LOGO_BREATHE_MIN_PERCENT) * level);
+  }
+  if (pwm != logoLastPwm) { // Only touch the pin when the value changes
+    ledcWrite(LOGO_PWM_PIN, pwm);
+    logoLastPwm = pwm;
+  }
 }
 
 //------------------------------------------------------------------- MODE + NAMES
@@ -883,7 +973,7 @@ void linkToHeardHost() {
 //------------------------------------------------------------------- ESP-NOW MULTI-DEVICE SYNC
 //
 // One Host, any number of Clients, plus Standalone units - all running this exact same firmware.
-// Every power-on searches for a Host; the Switch Mode popup can change the mode until power-off.
+// Every power-on searches for a Host; the Config menu can change the mode until power-off.
 //
 // Searching units broadcast MSG_HOST_QUERY; a Host replies with an announce straight away, so
 // searches finish in a fraction of a second when a Host is around.
@@ -915,10 +1005,11 @@ void broadcastAnnounce() {
   msg.brightnessPercent = brightnessPercent;
   msg.animation = currentAnimation;
   msg.speedPercent = speedPercent;
+  msg.logoMode = (uint8_t)logoMode;
   sendEspNowMessage(msg);
 }
 
-// Host only: pushes the current Brightness/Animation/Speed to every Client.
+// Host only: pushes the current Brightness/Animation/Speed and logo mode to every Client.
 // Call this any time one of those three values is confirmed.
 void broadcastStateIfHost() {
   if (deviceMode != MODE_HOST) return;
@@ -929,6 +1020,7 @@ void broadcastStateIfHost() {
   msg.brightnessPercent = brightnessPercent;
   msg.animation = currentAnimation;
   msg.speedPercent = speedPercent;
+  msg.logoMode = (uint8_t)logoMode;
   sendEspNowMessage(msg);
 }
 
@@ -1059,6 +1151,9 @@ void applyReceivedState(const EspNowMessage &msg) {
   }
   // If the animation type didn't change, its own runner already picks up the new
   // brightnessPercent/speedPercent on its next toggle - nothing else to push here.
+
+  // Case logo follows the Host (out-of-range values are ignored by setLogoMode)
+  if (msg.logoMode != (uint8_t)logoMode) setLogoMode((LogoMode)msg.logoMode);
 
   updateMenuItemDisplay(1); // Brightness
   updateMenuItemDisplay(2); // Animation
@@ -1559,6 +1654,8 @@ void runBootSequence() {
       firstQuery = false;
     }
 
+    runLogo(millis()); // Keep the case logo breathing during the boot screen
+
     unsigned long elapsed = millis() - start;
     if (vortexOk && elapsed - lastFrame >= BOOT_FRAME_MS) {
       lastFrame = elapsed;
@@ -1615,12 +1712,13 @@ void applyShortcutReset(int newBrightness, const String &message) {
   if (Debug) Serial.println("Shortcut: " + message);
 }
 
-//------------------------------------------------------------------- SWITCH MODE POPUP
+//------------------------------------------------------------------- CONFIG MENU (POPUP)
 //
 // Opened by holding OK (1s, release). While open it takes every button press.
-// Select screen focus order: New Mode selector -> Update -> Cancel
-//   selector: - / + pick the New Mode, OK moves to Update
-//   Update:   OK applies, + moves to Cancel, - goes back to the selector
+// Select screen focus order: Mode selector -> Logo selector -> Update -> Cancel
+//   Mode:     - / + pick Host / Client / Standalone (the current mode = no change), OK moves on
+//   Logo:     - / + pick Off / Steady / Breathe, OK moves on. Client: locked (follows the Host) - skipped
+//   Update:   OK applies, + moves to Cancel, - goes back to the Logo selector (Mode on a Client)
 //   Cancel:   OK returns to the main menu, - moves back to Update
 // Holding OK again also cancels.
 // The theme doesn't change while the popup is open - the new mode's colours appear when it closes.
@@ -1631,13 +1729,19 @@ void applyShortcutReset(int newBrightness, const String &message) {
 //                              from Standalone -> asks "Set this device as the new Host?"
 //   -> Host                : refused if a Host already exists ("set it to Client or Standalone first")
 
-// Next New Mode option in direction dir, never offering the current mode.
+// Next Mode option in direction dir. Includes the current mode, which means "no change".
 DeviceMode nextModeOption(DeviceMode from, int dir) {
-  DeviceMode m = from;
-  do {
-    m = (DeviceMode)((((int)m - 1 + dir + 3) % 3) + 1); // Cycles Host -> Client -> Standalone
-  } while (m == deviceMode);
-  return m;
+  return (DeviceMode)((((int)from - 1 + dir + 3) % 3) + 1); // Cycles Host -> Client -> Standalone
+}
+
+// Next Logo option in direction dir: Off -> Steady -> Breathe, wrapping both ways
+LogoMode nextLogoOption(LogoMode from, int dir) {
+  return (LogoMode)(((int)from + dir + LOGO_MODE_COUNT) % LOGO_MODE_COUNT);
+}
+
+// A Client's logo follows its Host, so it can't be changed in the Config menu
+bool logoLocked() {
+  return controlsLocked();
 }
 
 void openModePopup() {
@@ -1648,9 +1752,10 @@ void openModePopup() {
     if (currentAnimation == NONE) ledcWrite(LED_PWM_PIN, brightnessToPWM(brightnessPercent)); // Undo live preview
     updateMenuItemDisplay(currentSelection);
   }
-  drawNotificationText(NOTIFICATION_TEXT_Y, ""); // Clear the "Release to..." prompt
+  drawNotificationText(NOTIFICATION_TEXT_Y, ""); // Clear the "Release for..." prompt
   popupOpen = true;
-  popupNewMode = nextModeOption(deviceMode, 1);
+  popupNewMode = deviceMode; // Start on the current settings - nothing changes unless picked
+  popupNewLogo = logoMode;
   showPopupSelect();
 }
 
@@ -1662,7 +1767,7 @@ void cancelPopup() {
     return;
   }
   if (popupScreen == POP_CONFIRM_HOST) setMode(popupPrevMode);
-  closePopup("Mode unchanged");
+  closePopup("No changes");
 }
 
 // Back to the main menu, switched to the current mode's theme. Shows message in the info box if given.
@@ -1730,34 +1835,48 @@ void drawPopupButton(int x, int y, int w, const char *label, bool selected) {
   tft.setTextDatum(TL_DATUM);
 }
 
-// The "< Client >" selector under New Mode - glow colour while it has focus, grey otherwise
-void drawPopupModePill() {
-  int w = 160, h = 28;
-  int x = SW / 2 - w / 2;
-  int y = POP_Y + 112;
-  bool focused = (popupSelectFocus == 0);
-  uint16_t edge = focused ? glowColor : restEdge();
+// One "Label  < Value >" row in the Config menu - glow colour while it has focus,
+// grey otherwise, all greyed out (no chevrons) when locked.
+void drawPopupSelector(int y, const char *label, const String &value, bool focused, bool locked) {
+  int h = 28;
+  int x = POP_X + 66;
+  int w = POP_W - 66 - 12;
+  uint16_t edge = locked ? tft.alphaBlend(70, MENU_COL_MUTED, panelFill()) : focused ? glowColor : restEdge();
+
+  tft.fillRect(POP_X + 8, y - 2, POP_W - 16, h + 4, panelFill()); // Clear the row before redrawing
+  tft.setTextFont(2);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(locked ? MENU_COL_LOCKED : MENU_COL_TEXT);
+  tft.drawString(label, POP_X + 14, y + h / 2);
 
   drawGlowFrame(tft, x, y, w, h, 6, edge, focused ? activeFill() : panelFill(), 0, panelFill());
-  drawChevron(tft, x + 14, y + h / 2, -1, focused ? glowColor : MENU_COL_MUTED);
-  drawChevron(tft, x + w - 14, y + h / 2, 1, focused ? glowColor : MENU_COL_MUTED);
-  tft.setTextFont(2);
+  if (!locked) {
+    drawChevron(tft, x + 14, y + h / 2, -1, focused ? glowColor : MENU_COL_MUTED);
+    drawChevron(tft, x + w - 14, y + h / 2, 1, focused ? glowColor : MENU_COL_MUTED);
+  }
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(focused ? glowColor : MENU_COL_BODY);
-  tft.drawString(getModeName(popupNewMode), SW / 2, y + h / 2);
+  tft.setTextColor(locked ? MENU_COL_LOCKED : focused ? glowColor : MENU_COL_BODY);
+  tft.drawString(value, x + w / 2, y + h / 2);
   tft.setTextDatum(TL_DATUM);
+}
+
+// Mode + Logo selectors
+void drawPopupSelectors() {
+  drawPopupSelector(POP_Y + 84,  "Mode", getModeName(popupNewMode), popupSelectFocus == POP_FOCUS_MODE, false);
+  drawPopupSelector(POP_Y + 122, "Logo", getLogoName(logoLocked() ? logoMode : popupNewLogo),
+                    popupSelectFocus == POP_FOCUS_LOGO, logoLocked());
 }
 
 // Update + Cancel buttons - the focused one is filled
 void drawPopupSelectButtons() {
-  drawPopupButton(SW / 2 - 96, POP_Y + 152, 90, "Update", popupSelectFocus == 1);
-  drawPopupButton(SW / 2 + 6,  POP_Y + 152, 90, "Cancel", popupSelectFocus == 2);
+  drawPopupButton(SW / 2 - 96, POP_Y + 166, 90, "Update", popupSelectFocus == POP_FOCUS_UPDATE);
+  drawPopupButton(SW / 2 + 6,  POP_Y + 166, 90, "Cancel", popupSelectFocus == POP_FOCUS_CANCEL);
 }
 
 void showPopupSelect() {
   popupScreen = POP_SELECT;
-  popupSelectFocus = 0; // Start on the New Mode selector
-  drawPopupFrame("Toggle Mode");
+  popupSelectFocus = POP_FOCUS_MODE; // Start on the Mode selector
+  drawPopupFrame("Config");
 
   // "Current Mode: Host" - label in white, value in grey, centred as one line
   String label = "Current Mode: ";
@@ -1766,24 +1885,21 @@ void showPopupSelect() {
   int labelW = tft.textWidth(label);
   int valueW = tft.textWidth(value);
   int x = SW / 2 - (labelW + valueW) / 2;
-  int y = POP_Y + 62;
+  int y = POP_Y + 58;
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(MENU_COL_TEXT);
   tft.drawString(label, x, y);
   tft.setTextColor(MENU_COL_BODY);
   tft.drawString(value, x + labelW, y);
 
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(MENU_COL_TEXT);
-  tft.drawString("New Mode:", SW / 2, POP_Y + 98);
-  drawPopupModePill();
+  drawPopupSelectors();
   drawPopupSelectButtons();
   tft.setTextDatum(TL_DATUM);
 }
 
 // "Please wait" screen shown during a Host search
 void showPopupWorking(const String &message) {
-  drawPopupFrame("Toggle Mode");
+  drawPopupFrame("Config");
   drawWrapped(message, SW / 2, POP_Y + 96, POP_W - 28, 16, MENU_COL_BODY);
 }
 
@@ -1810,20 +1926,26 @@ void showPopupMessage(PopupScreen screen, const char *title, const String &body,
 }
 
 // - / + while the popup is open
-// Select screen focus order: New Mode selector -> Update -> Cancel
+// Select screen focus order: Mode selector -> Logo selector -> Update -> Cancel
 void popupNav(int dir) {
   resetInactivityTimer();
   if (popupScreen == POP_SELECT) {
-    if (popupSelectFocus == 0) {                                   // On the selector - change the New Mode
+    if (popupSelectFocus == POP_FOCUS_MODE) {                        // On the Mode selector - change it
       popupNewMode = nextModeOption(popupNewMode, dir);
-      drawPopupModePill();
+      drawPopupSelectors();
       return;
     }
-    if (dir > 0 && popupSelectFocus == 1) popupSelectFocus = 2;      // Update -> Cancel
-    else if (dir < 0 && popupSelectFocus == 2) popupSelectFocus = 1; // Cancel -> Update
-    else if (dir < 0 && popupSelectFocus == 1) popupSelectFocus = 0; // Update -> back to the selector
+    if (popupSelectFocus == POP_FOCUS_LOGO) {                        // On the Logo selector - change it
+      popupNewLogo = nextLogoOption(popupNewLogo, dir);
+      drawPopupSelectors();
+      return;
+    }
+    if (dir > 0 && popupSelectFocus == POP_FOCUS_UPDATE) popupSelectFocus = POP_FOCUS_CANCEL;      // Update -> Cancel
+    else if (dir < 0 && popupSelectFocus == POP_FOCUS_CANCEL) popupSelectFocus = POP_FOCUS_UPDATE; // Cancel -> Update
+    else if (dir < 0 && popupSelectFocus == POP_FOCUS_UPDATE)                                      // Update -> back up
+      popupSelectFocus = logoLocked() ? POP_FOCUS_MODE : POP_FOCUS_LOGO;
     else return;                                                     // + on Cancel - already at the end
-    drawPopupModePill();
+    drawPopupSelectors();
     drawPopupSelectButtons();
   } else if (popupScreen == POP_CONFIRM_HOST) {
     popupYesSelected = !popupYesSelected;
@@ -1836,14 +1958,18 @@ void popupOk() {
   resetInactivityTimer();
   switch (popupScreen) {
     case POP_SELECT:
-      if (popupSelectFocus == 0) {        // New Mode accepted - move to the Update button
-        popupSelectFocus = 1;
-        drawPopupModePill();
+      if (popupSelectFocus == POP_FOCUS_MODE) {        // Mode accepted - on to Logo (or Update on a Client)
+        popupSelectFocus = logoLocked() ? POP_FOCUS_UPDATE : POP_FOCUS_LOGO;
+        drawPopupSelectors();
         drawPopupSelectButtons();
-      } else if (popupSelectFocus == 1) { // Update
-        performModeChange();
-      } else {                            // Cancel - straight back to the main menu
-        closePopup("Mode unchanged");
+      } else if (popupSelectFocus == POP_FOCUS_LOGO) { // Logo accepted - on to Update
+        popupSelectFocus = POP_FOCUS_UPDATE;
+        drawPopupSelectors();
+        drawPopupSelectButtons();
+      } else if (popupSelectFocus == POP_FOCUS_UPDATE) {
+        applyConfig();
+      } else {                                         // Cancel - straight back to the main menu
+        closePopup("No changes");
       }
       break;
     case POP_CONFIRM_HOST: // "No Host found - set this device as the new Host?"
@@ -1853,7 +1979,7 @@ void popupOk() {
           String("This device has now been set as Host (") + fullDeviceName + ").", String(""));
       } else {
         setMode(popupPrevMode); // Back to what it was
-        popupNewMode = nextModeOption(deviceMode, 1);
+        popupNewMode = deviceMode;
         showPopupSelect();
       }
       break;
@@ -1866,7 +1992,24 @@ void popupOk() {
   }
 }
 
-// "Update" pressed - apply popupNewMode and show the outcome
+// "Update" pressed - applies the Logo choice, then the Mode choice (if it changed).
+// A mode change shows its own result screen; otherwise the menu closes with a summary.
+void applyConfig() {
+  bool logoChanged = !logoLocked() && popupNewLogo != logoMode;
+  if (logoChanged) {
+    setLogoMode(popupNewLogo);
+    broadcastStateIfHost(); // Clients copy the Host's logo
+    if (Debug) Serial.println("Logo set to " + getLogoName(logoMode));
+  }
+
+  if (popupNewMode != deviceMode) {
+    performModeChange();
+    return;
+  }
+  closePopup(logoChanged ? "Logo set to " + getLogoName(logoMode) : String("No changes"));
+}
+
+// Applies popupNewMode (different from the current mode) and shows the outcome
 void performModeChange() {
   DeviceMode target = popupNewMode;
   bool wasHost = (deviceMode == MODE_HOST);
@@ -1930,7 +2073,7 @@ int getRampStepSize(unsigned long heldDurationMs) {
 }
 
 // A Client follows its Host - Brightness, Animation, Speed and the 50% / All Off shortcuts are locked.
-// Switch Mode (hold OK) still works.
+// The Config menu (hold OK) still works.
 bool controlsLocked() {
   return deviceMode == MODE_CLIENT;
 }
@@ -2299,7 +2442,7 @@ int drawKeyGlyph(TFT_eSPI &g, const char *key, int x, int y, uint16_t col) {
 // Page 0: "Button Shortcuts (Hold)" - each row: icon (glow colour), name (grey), then the keys.
 void drawShortcutPage(TFT_eSPI &g, int ox, int oy, uint8_t level) {
   const int icons[3]   = { 0, 1, 2 };   // Sun, power, toggle
-  const char *names[3] = { "50% Brightness", "All Off", "Switch Mode" };
+  const char *names[3] = { "50% Brightness", "All Off", "Config Menu" };
   const char *keys[3][3] = {          // "" = no more keys on that line
     { "-",  "+", ""   },
     { "-",  "+", "OK" },
@@ -2381,7 +2524,7 @@ void drawKeyPage(TFT_eSPI &g, int ox, int oy, uint8_t level) {
   drawKeyRows(g, ox, oy + INFO_TITLE_H, INFO_ROW_H, level);
 }
 
-// Client's only page (no cycling): yellow padlock + "Controlled by Host", the Switch Mode
+// Client's only page (no cycling): yellow padlock + "Controlled by Host", the Config Menu
 // shortcut, then a "Key" header and the Key rows.
 void drawClientPage(TFT_eSPI &g, int ox, int oy) {
   uint16_t line = dividerCol();
@@ -2402,11 +2545,11 @@ void drawClientPage(TFT_eSPI &g, int ox, int oy) {
   g.setTextColor(INFO_COL_TITLE);
   g.drawString("Controlled by Host", ox + INFO_ICON_COL_W + 8, ty);
 
-  // Switch Mode - Hold OK
+  // Config Menu - Hold OK
   int y = rowY(0);
   drawSmallIcon(g, 2, ox + INFO_ICON_DX, y, glowColor, panelFill());
   g.setTextColor(INFO_COL_TEXT);
-  g.drawString("Switch Mode", ox + INFO_TEXT_DX, y);
+  g.drawString("Config Menu", ox + INFO_TEXT_DX, y);
   int x = ox + SHORTCUT_KEYS_DX;
   g.drawString("Hold ", x, y);
   drawKeyGlyph(g, "OK", x + g.textWidth("Hold "), y, glowColor);
@@ -2450,7 +2593,7 @@ void showInfoPageNow() {
 }
 
 // Called from loop(): after INFO_CYCLE_MS, fades the page out, switches page, fades back in.
-// Paused while asleep, while the Switch Mode popup is open, or while a notification is showing.
+// Paused while asleep, while the Config menu is open, or while a notification is showing.
 // A Client has one fixed page, so it never cycles.
 void infoTick(unsigned long now) {
   if (screenSleeping || popupOpen || notifyUntil != 0 || controlsLocked()) return;
@@ -2670,8 +2813,9 @@ void updateMenuItemDisplay(int itemIndex) {
 
 //------------------------------------------------------------------- ANIMATIONS
 
-// Runs whichever LED animation is active. Called from loop() and during blocking searches.
+// Runs whichever LED animation is active, plus the case logo. Called from loop() and during blocking searches.
 void runAnimations() {
+  runLogo(millis());
   if (currentAnimation == BLINK) runBlinkAnimation();
   else if (currentAnimation == LIGHTNING) runLightningAnimation();
   else if (currentAnimation == STROBE) runStrobeAnimation();
