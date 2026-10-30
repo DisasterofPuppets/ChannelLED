@@ -66,11 +66,12 @@ See LOGO_* in DEFINES and VARIABLES. Touch is not used - GPIO 32 / 33 are free f
 None of the button pins (35, 22, 27) are ESP32 boot strapping pins, so holding them at
 power-on can't stop the board booting.
 
---- CONFIG MENU (hold OK) ---
-  Mode:  - / + pick Host / Client / Standalone (leave it on the current mode for no change)  -> OK moves on
-  Logo:  - / + pick Off / Steady / Breathe (Client: locked - follows the Host)               -> OK moves on
-  Update: OK applies.  + moves Update -> Cancel, - moves back (Cancel -> Update -> Logo)
-  Cancel (or holding OK) returns to the main menu with nothing changed.
+--- CONFIG MENU (hold OK) - works like the main menu ---
+  - / +  move the highlight: Mode -> Logo -> Update -> Cancel (wraps; Client skips the locked Logo)
+  OK on Mode / Logo  -> edit it: - / + change the value, OK again to confirm it
+     Mode: Host / Client / Standalone (leave it on the current mode for no change)
+     Logo: Off / Steady / Breathe (Client: locked - follows the Host)
+  OK on Update applies. OK on Cancel (or holding OK) returns to the main menu with nothing changed.
 
 --- CASE LOGO BACKLIGHT ---
   Off / Steady / Breathe, set in the Config menu. The Host's choice is copied to every Client.
@@ -140,7 +141,7 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 
 // --- PWM config (ESP32 Arduino core v3.x API) ---
 #define LED_PWM_PIN     25  // Soldered direct to the module - see hardware note at top of file
-#define PWM_FREQ        20000  // 20kHz - above most people's hearing (stops PWM whine). XY-MOS modules are rated up to 20kHz
+#define PWM_FREQ        5000   // Hz. If the battens whine, 20000 (20kHz) moves it above hearing - XY-MOS rated to 20kHz
 #define PWM_RESOLUTION  8  // 0-255
 
 // --- Case logo backlight (WS2812 strip via the diode trick - see hardware note) ---
@@ -491,6 +492,7 @@ PopupScreen popupScreen = POP_SELECT;
 #define POP_FOCUS_UPDATE  2
 #define POP_FOCUS_CANCEL  3
 uint8_t popupSelectFocus = POP_FOCUS_MODE;
+bool popupEditing = false;              // true = the highlighted Mode / Logo selector is being changed (like itemActivated)
 DeviceMode popupNewMode = MODE_CLIENT;  // Option shown in the Mode selector (current mode = no change)
 DeviceMode popupPrevMode = MODE_STANDALONE; // Mode to go back to if "No" is chosen
 bool popupYesSelected = false;          // Yes/No focus on the "No Host found" question
@@ -1721,11 +1723,12 @@ void applyShortcutReset(int newBrightness, const String &message) {
 //------------------------------------------------------------------- CONFIG MENU (POPUP)
 //
 // Opened by holding OK (1s, release). While open it takes every button press.
-// Select screen focus order: Mode selector -> Logo selector -> Update -> Cancel
-//   Mode:     - / + pick Host / Client / Standalone (the current mode = no change), OK moves on
-//   Logo:     - / + pick Off / Steady / Breathe, OK moves on. Client: locked (follows the Host) - skipped
-//   Update:   OK applies, + moves to Cancel, - goes back to the Logo selector (Mode on a Client)
-//   Cancel:   OK returns to the main menu, - moves back to Update
+// Works like the main menu: - / + move the highlight, OK starts / confirms editing a selector.
+// Highlight order (wraps): Mode selector -> Logo selector -> Update -> Cancel
+//   Mode:     OK to edit, - / + pick Host / Client / Standalone (the current mode = no change), OK to confirm
+//   Logo:     OK to edit, - / + pick Off / Steady / Breathe, OK to confirm. Client: locked - skipped
+//   Update:   OK applies
+//   Cancel:   OK returns to the main menu
 // Holding OK again also cancels.
 // The theme doesn't change while the popup is open - the new mode's colours appear when it closes.
 //
@@ -1779,6 +1782,7 @@ void cancelPopup() {
 // Back to the main menu, switched to the current mode's theme. Shows message in the info box if given.
 void closePopup(const String &message) {
   popupOpen = false;
+  popupEditing = false;
   applyTheme(deviceMode);
   drawFullMenu();
   if (message.length()) drawNotificationText(NOTIFICATION_TEXT_Y, message);
@@ -1841,13 +1845,15 @@ void drawPopupButton(int x, int y, int w, const char *label, bool selected) {
   tft.setTextDatum(TL_DATUM);
 }
 
-// One "Label  < Value >" row in the Config menu - glow colour while it has focus,
-// grey otherwise, all greyed out (no chevrons) when locked.
-void drawPopupSelector(int y, const char *label, const String &value, bool focused, bool locked) {
+// One "Label  < Value >" row in the Config menu, styled like the main menu rows:
+//   resting = normal edge, hovered = bright (near-white) edge, editing = glow edge + filled + glow value,
+//   locked = greyed out with no chevrons.
+void drawPopupSelector(int y, const char *label, const String &value, bool hovered, bool editing, bool locked) {
   int h = 28;
   int x = POP_X + 66;
   int w = POP_W - 66 - 12;
-  uint16_t edge = locked ? tft.alphaBlend(70, MENU_COL_MUTED, panelFill()) : focused ? glowColor : restEdge();
+  uint16_t edge = locked ? tft.alphaBlend(70, MENU_COL_MUTED, panelFill())
+                : editing ? glowColor : hovered ? hotEdge() : restEdge();
 
   tft.fillRect(POP_X + 8, y - 2, POP_W - 16, h + 4, panelFill()); // Clear the row before redrawing
   tft.setTextFont(2);
@@ -1855,22 +1861,24 @@ void drawPopupSelector(int y, const char *label, const String &value, bool focus
   tft.setTextColor(locked ? MENU_COL_LOCKED : MENU_COL_TEXT);
   tft.drawString(label, POP_X + 14, y + h / 2);
 
-  drawGlowFrame(tft, x, y, w, h, 6, edge, focused ? activeFill() : panelFill(), 0, panelFill());
+  drawGlowFrame(tft, x, y, w, h, 6, edge, editing ? activeFill() : panelFill(), 0, panelFill());
   if (!locked) {
-    drawChevron(tft, x + 14, y + h / 2, -1, focused ? glowColor : MENU_COL_MUTED);
-    drawChevron(tft, x + w - 14, y + h / 2, 1, focused ? glowColor : MENU_COL_MUTED);
+    drawChevron(tft, x + 14, y + h / 2, -1, editing ? glowColor : MENU_COL_MUTED);
+    drawChevron(tft, x + w - 14, y + h / 2, 1, editing ? glowColor : MENU_COL_MUTED);
   }
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(locked ? MENU_COL_LOCKED : focused ? glowColor : MENU_COL_BODY);
+  tft.setTextColor(locked ? MENU_COL_LOCKED : editing ? glowColor : MENU_COL_BODY);
   tft.drawString(value, x + w / 2, y + h / 2);
   tft.setTextDatum(TL_DATUM);
 }
 
 // Mode + Logo selectors
 void drawPopupSelectors() {
-  drawPopupSelector(POP_Y + 84,  "Mode", getModeName(popupNewMode), popupSelectFocus == POP_FOCUS_MODE, false);
+  bool onMode = (popupSelectFocus == POP_FOCUS_MODE);
+  bool onLogo = (popupSelectFocus == POP_FOCUS_LOGO);
+  drawPopupSelector(POP_Y + 84,  "Mode", getModeName(popupNewMode), onMode && !popupEditing, onMode && popupEditing, false);
   drawPopupSelector(POP_Y + 122, "Logo", getLogoName(logoLocked() ? logoMode : popupNewLogo),
-                    popupSelectFocus == POP_FOCUS_LOGO, logoLocked());
+                    onLogo && !popupEditing, onLogo && popupEditing, logoLocked());
 }
 
 // Update + Cancel buttons - the focused one is filled
@@ -1881,7 +1889,8 @@ void drawPopupSelectButtons() {
 
 void showPopupSelect() {
   popupScreen = POP_SELECT;
-  popupSelectFocus = POP_FOCUS_MODE; // Start on the Mode selector
+  popupSelectFocus = POP_FOCUS_MODE; // Mode highlighted, but not being edited
+  popupEditing = false;
   drawPopupFrame("Config");
 
   // "Current Mode: Host" - label in white, value in grey, centred as one line
@@ -1936,21 +1945,16 @@ void showPopupMessage(PopupScreen screen, const char *title, const String &body,
 void popupNav(int dir) {
   resetInactivityTimer();
   if (popupScreen == POP_SELECT) {
-    if (popupSelectFocus == POP_FOCUS_MODE) {                        // On the Mode selector - change it
-      popupNewMode = nextModeOption(popupNewMode, dir);
+    if (popupEditing) {                                              // Editing a selector - change its value
+      if (popupSelectFocus == POP_FOCUS_MODE) popupNewMode = nextModeOption(popupNewMode, dir);
+      else popupNewLogo = nextLogoOption(popupNewLogo, dir);
       drawPopupSelectors();
       return;
     }
-    if (popupSelectFocus == POP_FOCUS_LOGO) {                        // On the Logo selector - change it
-      popupNewLogo = nextLogoOption(popupNewLogo, dir);
-      drawPopupSelectors();
-      return;
-    }
-    if (dir > 0 && popupSelectFocus == POP_FOCUS_UPDATE) popupSelectFocus = POP_FOCUS_CANCEL;      // Update -> Cancel
-    else if (dir < 0 && popupSelectFocus == POP_FOCUS_CANCEL) popupSelectFocus = POP_FOCUS_UPDATE; // Cancel -> Update
-    else if (dir < 0 && popupSelectFocus == POP_FOCUS_UPDATE)                                      // Update -> back up
-      popupSelectFocus = logoLocked() ? POP_FOCUS_MODE : POP_FOCUS_LOGO;
-    else return;                                                     // + on Cancel - already at the end
+    // Move the highlight (wraps both ways), skipping the Logo selector when it's locked
+    do {
+      popupSelectFocus = (popupSelectFocus + dir + 4) % 4;
+    } while (popupSelectFocus == POP_FOCUS_LOGO && logoLocked());
     drawPopupSelectors();
     drawPopupSelectButtons();
   } else if (popupScreen == POP_CONFIRM_HOST) {
@@ -1964,14 +1968,9 @@ void popupOk() {
   resetInactivityTimer();
   switch (popupScreen) {
     case POP_SELECT:
-      if (popupSelectFocus == POP_FOCUS_MODE) {        // Mode accepted - on to Logo (or Update on a Client)
-        popupSelectFocus = logoLocked() ? POP_FOCUS_UPDATE : POP_FOCUS_LOGO;
+      if (popupSelectFocus == POP_FOCUS_MODE || popupSelectFocus == POP_FOCUS_LOGO) {
+        popupEditing = !popupEditing;                  // Start editing, or confirm and go back to highlighted
         drawPopupSelectors();
-        drawPopupSelectButtons();
-      } else if (popupSelectFocus == POP_FOCUS_LOGO) { // Logo accepted - on to Update
-        popupSelectFocus = POP_FOCUS_UPDATE;
-        drawPopupSelectors();
-        drawPopupSelectButtons();
       } else if (popupSelectFocus == POP_FOCUS_UPDATE) {
         applyConfig();
       } else {                                         // Cancel - straight back to the main menu
