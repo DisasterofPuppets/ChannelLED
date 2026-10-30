@@ -17,9 +17,11 @@ GPIO 35 (LEFT / -) is input-only with no internal pull-up - it needs the externa
 Two connections are soldered straight to the ESP32-WROOM-32 module (not on any header):
   - GROUND: top-right pin of the module, next to the antenna shield.
   - GPIO 25 (PWM out to the MOSFET's TRIG/PWM pin): 5th pin up from the bottom-left corner.
-Case logo backlight: 3 plain LEDs (red / green / blue), each 5V -> resistor (150 / 220 / 220 ohm) -> LED,
-all LED cathodes -> IRLB8721 N-channel MOSFET Drain, Source -> GND.
-Gate <- 220 ohm <- GPIO 23 (SD card socket pin 3 (CMD) - keep the SD slot empty), plus 10k Gate -> GND.
+Case logo backlight: a short WS2812 strip (3 LEDs, uncut), wired at its arrow-start (input) end:
+  5V (buck OUT+) -> 1N4004 diode (stripe towards the strip) -> strip 5V   (~4.3V - the "diode trick")
+  GPIO 23 -> 330 ohm -> strip DIN   (SD card socket pin 3 (CMD) - keep the SD slot empty)
+  GND -> strip GND (shared with the CYD), plus 100-330uF 16V+ electrolytic across strip 5V / GND.
+  The diode drops the strip supply so the ESP32's 3.3V data counts as a valid HIGH - no level shifter.
 See LOGO_* in DEFINES and VARIABLES. Touch is not used - GPIO 32 / 33 are free for outputs (25 = batten PWM).
 --------------------------------------------------------------------------------------------------
 
@@ -84,6 +86,7 @@ You may see the below warning, but can safely ignore it - the CYD is used as a d
   #warning >>>>------>> TOUCH_CS pin not defined, TFT_eSPI touch functions will not be available!
 
 Needs LOAD_GFXFF enabled in TFT_eSPI's User_Setup.h (for the bold FreeSansBold logo font).
+Needs the "FastLED" library (3.9 or newer) from the Library Manager, for the case logo strip.
 */
 
 
@@ -91,6 +94,7 @@ Needs LOAD_GFXFF enabled in TFT_eSPI's User_Setup.h (for the bold FreeSansBold l
 #include <TFT_eSPI.h>     // Copy this repo's User_Setup.h into the TFT_eSPI library folder (see README).
 #include <WiFi.h>         // Required for ESP-NOW - puts the radio in STA mode, no actual WiFi connection is made.
 #include <esp_now.h>      // ESP-NOW: multi-device sync between battens.
+#include <FastLED.h>      // Case logo WS2812 strip (install "FastLED" 3.9+ from the Library Manager)
 
 //------------------------------------------  DEFINES  --------------------------------------------
 
@@ -136,14 +140,15 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 
 // --- PWM config (ESP32 Arduino core v3.x API) ---
 #define LED_PWM_PIN     25  // Soldered direct to the module - see hardware note at top of file
-#define PWM_FREQ        20000  // 20kHz - above most people's hearing. XY-MOS modules are rated up to 20kHz was 5000 but loud sound when lights turned on.
+#define PWM_FREQ        20000  // 20kHz - above most people's hearing (stops PWM whine). XY-MOS modules are rated up to 20kHz
 #define PWM_RESOLUTION  8  // 0-255
 
-// --- Case logo backlight (3 plain LEDs switched by an IRLB8721 MOSFET - see hardware note) ---
-#define LOGO_PWM_PIN         23     // MOSFET Gate (via 220 ohm). SD socket pin 3 (CMD) - keep the SD slot empty
-#define LOGO_PWM_FREQ        20000   // Hz - same as the battens, flicker-free
-#define LOGO_PWM_RESOLUTION  8      // 0-255
-#define LOGO_UPDATE_MS       20     // How often the Breathe fade is recalculated (~50 steps a second)
+// --- Case logo backlight (WS2812 strip via the diode trick - see hardware note) ---
+#define LOGO_LED_PIN         23       // Strip DIN (via 330 ohm). SD socket pin 3 (CMD) - keep the SD slot empty
+#define LOGO_LED_COUNT       3        // LEDs on the strip piece - set to match if yours has more
+#define LOGO_LED_CHIPSET     WS2812B  // FastLED chipset name (e.g. WS2812B, SK6812)
+#define LOGO_COLOR_ORDER     GRB      // If red and green come out swapped, try RGB
+#define LOGO_UPDATE_MS       20       // How often the Breathe fade is recalculated (~50 steps a second)
 
 // --- Chase animation (each unit pulses in turn: Host first, then each Client in name order) ---
 #define CHASE_PEAK_PERCENT   50     // Brightness at the top of each pulse
@@ -503,13 +508,17 @@ const uint8_t LOGO_STEADY_PERCENT          = 60;       // Steady brightness
 const uint8_t LOGO_BREATHE_MIN_PERCENT     = 5;        // Bottom of each breath (0 = fully off)
 const uint8_t LOGO_BREATHE_MAX_PERCENT     = 100;      // Top of each breath
 const unsigned long LOGO_BREATHE_PERIOD_MS = 4000;     // One full breath, in and out
+// Colour of each LED (0xRRGGBB), LED 1 is the first on the data line. Matches the on-screen logo:
+// L = red, E = green, D = blue. Extra LEDs (if LOGO_LED_COUNT > 3) stay off unless given a colour here.
+const uint32_t LOGO_COLOURS[LOGO_LED_COUNT] = { 0xFF0000, 0x00FF00, 0x0000FF }; // 1 = red, 2 = green, 3 = blue
 // ===== (end of logo settings) =====
 
 // Logo runtime state - don't edit these directly
-bool logoReady = false;                  // PWM attached to LOGO_PWM_PIN OK
+bool logoReady = false;                  // Strip set up OK
+CRGB logoLeds[LOGO_LED_COUNT];           // FastLED buffer for the strip
 unsigned long logoBreatheStart = 0;      // millis() the current breath cycle started
 unsigned long lastLogoUpdate = 0;        // millis() of the last fade step
-int logoLastPwm = -1;                    // Last value written to the pin (-1 = nothing yet)
+int logoLastLevel = -1;                  // Last brightness sent to the strip (-1 = nothing yet)
 LogoMode popupNewLogo = LOGO_BREATHE;    // Option shown in the Config menu's Logo selector
 
 // --- Sprites ---
@@ -826,43 +835,39 @@ void applyTheme(DeviceMode mode) {
 
 //------------------------------------------------------------------- CASE LOGO BACKLIGHT
 
-// 3 plain LEDs switched by the IRLB8721 MOSFET, PWM on LOGO_PWM_PIN.
+// WS2812 strip on LOGO_LED_PIN, fed through the diode trick (see hardware note).
+// Each LED holds a fixed colour (LOGO_COLOURS); Off / Steady / Breathe only change the brightness.
 // Runs on its own - not affected by screen sleep, the batten brightness or All Off.
 
-// Attaches the logo PWM. On failure the error is logged and the logo is disabled -
-// the battens, display and sync carry on, so one bad pin can't take the lights down.
+// Checks the logo settings, then starts the strip. On a bad setting the error is logged and the
+// logo is disabled - the battens, display and sync carry on, so the logo can't take the lights down.
 void setupLogo() {
   // Check the user settings first - a 0 period would divide by zero in runLogo()
-  const char *settingsError = (LOGO_BREATHE_PERIOD_MS == 0)                         ? "LOGO_BREATHE_PERIOD_MS must be above 0."
+  const char *settingsError = (LOGO_LED_COUNT < 1)                                  ? "LOGO_LED_COUNT must be 1 or more."
+                            : (LOGO_BREATHE_PERIOD_MS == 0)                         ? "LOGO_BREATHE_PERIOD_MS must be above 0."
                             : (LOGO_BREATHE_MIN_PERCENT > LOGO_BREATHE_MAX_PERCENT) ? "LOGO_BREATHE_MIN_PERCENT must be <= LOGO_BREATHE_MAX_PERCENT."
                             : (LOGO_BREATHE_MAX_PERCENT > 100 || LOGO_STEADY_PERCENT > 100) ? "Logo percentages must be 0-100."
                             : nullptr;
   if (settingsError) {
     logoReady = false;
     Serial.println("=========== ERROR LOG ===========");
-    Serial.printf("ERROR: Invalid logo setting in VARIABLES - %s\n", settingsError);
+    Serial.printf("ERROR: Invalid logo setting in DEFINES / VARIABLES - %s\n", settingsError);
     Serial.println("Logo backlight disabled. Fix the setting and re-upload.");
     Serial.println("=================================");
     return;
   }
 
-  if (!ledcAttach(LOGO_PWM_PIN, LOGO_PWM_FREQ, LOGO_PWM_RESOLUTION)) {
-    logoReady = false;
-    Serial.println("=========== ERROR LOG ===========");
-    Serial.printf("ERROR: ledcAttach() failed on GPIO %d (case logo backlight).\n", LOGO_PWM_PIN);
-    Serial.println("Cause: pin already in use, or no free PWM channel. Logo backlight disabled.");
-    Serial.println("=================================");
-    return;
-  }
+  FastLED.addLeds<LOGO_LED_CHIPSET, LOGO_LED_PIN, LOGO_COLOR_ORDER>(logoLeds, LOGO_LED_COUNT);
+  for (int i = 0; i < LOGO_LED_COUNT; i++) logoLeds[i] = CRGB(LOGO_COLOURS[i]); // Fixed colour per letter
   logoReady = true;
   setLogoMode(logoMode); // Start in the power-on default
-  if (Debug) Serial.printf("Logo backlight ready on GPIO %d - %s\n", LOGO_PWM_PIN, getLogoName(logoMode).c_str());
+  if (Debug) Serial.printf("Logo strip ready: %d LEDs on GPIO %d - %s\n", LOGO_LED_COUNT, LOGO_LED_PIN, getLogoName(logoMode).c_str());
 }
 
-// Converts 0-100% to a PWM value with a simple gamma curve, so the fade looks even to the eye
-int logoPercentToPWM(float percent) {
+// Converts 0-100% to a 0-255 strip brightness with a simple gamma curve, so the fade looks even to the eye
+int logoPercentToLevel(float percent) {
   float f = constrain(percent, 0.0f, 100.0f) / 100.0f;
-  return (int)(f * f * ((1 << LOGO_PWM_RESOLUTION) - 1) + 0.5f);
+  return (int)(f * f * 255.0f + 0.5f);
 }
 
 String getLogoName(LogoMode m) {
@@ -889,17 +894,18 @@ void runLogo(unsigned long now) {
   if (!logoReady || now - lastLogoUpdate < LOGO_UPDATE_MS) return;
   lastLogoUpdate = now;
 
-  int pwm = 0;
+  int level = 0; // Off
   if (logoMode == LOGO_STEADY) {
-    pwm = logoPercentToPWM(LOGO_STEADY_PERCENT);
+    level = logoPercentToLevel(LOGO_STEADY_PERCENT);
   } else if (logoMode == LOGO_BREATHE) {
     float phase = (float)((now - logoBreatheStart) % LOGO_BREATHE_PERIOD_MS) / LOGO_BREATHE_PERIOD_MS;
-    float level = (1.0f - cos(2.0f * PI * phase)) / 2.0f; // 0 -> 1 -> 0 over one period
-    pwm = logoPercentToPWM(LOGO_BREATHE_MIN_PERCENT + (LOGO_BREATHE_MAX_PERCENT - LOGO_BREATHE_MIN_PERCENT) * level);
+    float wave = (1.0f - cos(2.0f * PI * phase)) / 2.0f; // 0 -> 1 -> 0 over one period
+    level = logoPercentToLevel(LOGO_BREATHE_MIN_PERCENT + (LOGO_BREATHE_MAX_PERCENT - LOGO_BREATHE_MIN_PERCENT) * wave);
   }
-  if (pwm != logoLastPwm) { // Only touch the pin when the value changes
-    ledcWrite(LOGO_PWM_PIN, pwm);
-    logoLastPwm = pwm;
+  if (level != logoLastLevel) { // Only send to the strip when the brightness changes
+    FastLED.setBrightness((uint8_t)level);
+    FastLED.show();
+    logoLastLevel = level;
   }
 }
 
@@ -1330,11 +1336,11 @@ void drawDiamond(TFT_eSPI &g, int cx, int cy, int r) {
   g.drawLine(cx - r, cy, cx, cy - r, TFT_WHITE);                         // Highlight edge
 }
 
-// Diamond logo + bold "ChannelLED" (L=red, E=blue, D=green), left-aligned at x, centred on y.
+// Diamond logo + bold "ChannelLED" (L=red, E=green, D=blue), left-aligned at x, centred on y.
 // The only bold text on the screen. large = boot screen size, otherwise header size.
 void drawLogoTitle(TFT_eSPI &g, int x, int y, bool large) {
   const char *parts[4]   = { "Channel", "L", "E", "D" };
-  const uint16_t cols[4] = { TFT_WHITE, TFT_RED, TFT_BLUE, TFT_GREEN };
+  const uint16_t cols[4] = { TFT_WHITE, TFT_RED, TFT_GREEN, TFT_BLUE }; // Matches the case logo LEDs
   int r = large ? 9 : 6;
   drawDiamond(g, x + r, y, r);
   x += r * 2 + (large ? 8 : 6);
