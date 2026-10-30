@@ -2,16 +2,14 @@
 
 **ChannelLED** is an ESP32 light controller for custom LED battens, built on the **Cheap Yellow Display** (ESP32-2432S028R).
 
-Three physical buttons and a glowing on-screen menu control the brightness, animation and speed of the lights. 
-Several lights can be linked wirelessly over **ESP-NOW**: set one and the rest follow. 
-No Wi-Fi network or router is needed.
+Three physical buttons and a glowing on-screen menu control the brightness, animation and speed of the lights. Several lights can be linked wirelessly over **ESP-NOW**: set one and the rest follow. No Wi-Fi network or router is needed.
 
 ---
 
 ## What it does
 
 - **Dims LED battens** smoothly from 0–100% using PWM through a dual-MOSFET module
-- **Runs animations:** None, Blink, Lightning, Strobe and Chase. Chase pulses each linked light in turn. (white LEDs only at this stage.)
+- **Runs animations:** None, Blink, Lightning, Strobe and Chase. Chase pulses each linked light in turn.
 - **Links multiple lights** wirelessly:
   - **Host:** leads the group. Only one per group.
   - **Client:** follows the Host and reconnects automatically if it drops out.
@@ -32,8 +30,12 @@ No Wi-Fi network or router is needed.
 - 24V to 5V step-down module (powers the CYD)
 - 3 × momentary push buttons
 - 3 × 10kΩ resistors (pull-ups)
+- 1 x 330Ω resistor (for LED strip) 
 - 3 × 100nF ceramic capacitors (button debounce)
 - Illuminated power switch (24V compatible)
+- 3 × 5V addressable LEDs (e.g. WS2812B) for the case logo backlight (optional)
+- WS2812B Addressible 5050 RGB 144 LEDs/m Strip (3 LEDS in length)
+- IN4004 Diode
 
 ### LEDs per light
 
@@ -63,6 +65,7 @@ Manually solder to the below pads to access GPIO25 and another ground:
 
 | LED PWM out → MOSFET TRIG/PWM | 25 | **Solder directly to the ESP32 module.** It's the 5th pin up from the bottom-left corner. |
 | Ground | GND | **Solder directly to the ESP32 module.** It's the top-right pin, next to the antenna shield. |
+| Case logo LEDs (data in) | 23 | Optional. Solder to **SD card socket pin 3 (CMD)**, or its pull-up pad on RN2. Keep the SD slot empty. Power the LEDs from the 5V step-down. |
 
 > ⚠️ **GPIO 21 is tied to the LCD backlight.** Don't use it for anything else.
 > None of the button pins are boot-strapping pins, so holding a button at power-on won't stop the board booting.
@@ -73,7 +76,9 @@ Manually solder to the below pads to access GPIO25 and another ground:
 
 1. Install the **Arduino IDE** and the **ESP32 Arduino core v3.x**: Boards Manager → *esp32 by Espressif*. The sketch uses `ledcAttach()` and the v3 ESP-NOW callback.
 2. Select the board: **ESP32 Dev Module**.
-3. Install the **TFT_eSPI** library (by Bodmer) from the Library Manager.
+3. Install these libraries from the Library Manager:
+   - **TFT_eSPI** (by Bodmer)
+   - **FastLED** (3.9 or newer, for ESP32 core v3), for the case logo LEDs
 4. **Set up TFT_eSPI for the CYD with the `User_Setup.h` in this repo:**
    1. Find the TFT_eSPI library folder:
       - **Windows:** `Documents\Arduino\libraries\TFT_eSPI\`
@@ -200,6 +205,21 @@ UiTheme standaloneTheme = { 0x38E0, 60, 0xFC60, 40 };  // Orange
 - **backgroundIntensity:** 0 is black, 100 is the background colour at full strength
 - **glow:** colour of the frames, highlights and icons
 - **glowIntensity:** 0 is no glow, 100 is the strongest glow
+
+### Case logo backlight
+
+Three addressable LEDs light the logo on the case in fixed colours. They stay on, even while the screen sleeps.
+
+```cpp
+#define LOGO_LEDS_ENABLED  true   // false if no logo LEDs are fitted
+#define LOGO_LED_PIN       23
+uint8_t  logoBrightnessPercent = 50;  // 0 = off ... 100 = full
+uint32_t logoColours[LOGO_LED_COUNT] = { 0xFF0000, 0x00FF00, 0x0000FF }; // red, green, blue
+```
+
+If red and green come out swapped, change `LOGO_COLOR_ORDER` from `GRB` to `RGB`. For a different LED type, change `LOGO_LED_CHIPSET` (e.g. `SK6812`).
+
+### Text colours
 
 Text colours are set in `DEFINES`:
 
