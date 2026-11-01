@@ -86,8 +86,6 @@ The ESP32 sends 3.3V data, which is too low for WS2812 LEDs running on a full 5V
 2. **GND → strip GND** - take it straight from the buck / GND bus, shared with the CYD
 3. **GPIO 23 → 330Ω → strip DIN**, at the arrow-start end of the strip
 
-> ⚠️ **Flash the matching code before connecting the strip.** Older versions of the sketch drive GPIO 23 as PWM, which the LEDs read as garbage and can latch at full white - a short strip gets hot fast.
-
 ---
 
 ## Software Setup
