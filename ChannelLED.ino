@@ -14,8 +14,9 @@ Board: ESP32 Dev Module (Arduino IDE, ESP32 core v3.x).
 --- HARDWARE NOTE ---
 GPIO 21 on the P3 header drives the LCD backlight - don't use it for anything else.
 GPIO 35 (LEFT / -) is input-only with no internal pull-up - it needs the external 10k pull-up.
-Two connections are soldered straight to the ESP32-WROOM-32 module (not on any header):
+Three connections are soldered straight to the ESP32-WROOM-32 module (not on any header):
   - GROUND: top-right pin of the module, next to the antenna shield.
+  - GPIO 23 (3 LED Strip DIN), second from the top-right, beside ground.
   - GPIO 25 (PWM out to the MOSFET's TRIG/PWM pin): 5th pin up from the bottom-left corner.
 Case logo backlight: a short WS2812 strip (3 LEDs, uncut), wired at its arrow-start (input) end:
   5V (buck OUT+) -> 1N4004 diode (stripe towards the strip) -> strip 5V   (~4.3V - the "diode trick")
@@ -141,7 +142,7 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 
 // --- PWM config (ESP32 Arduino core v3.x API) ---
 #define LED_PWM_PIN     25  // Soldered direct to the module - see hardware note at top of file
-#define PWM_FREQ        5000   // Hz. If the battens whine, 20000 (20kHz) moves it above hearing - XY-MOS rated to 20kHz
+#define PWM_FREQ        20000   // Hz. default 5000 If the battens whine, 20000 (20kHz) moves it above hearing - XY-MOS rated to 20kHz
 #define PWM_RESOLUTION  8  // 0-255
 
 // --- Case logo backlight (WS2812 strip via the diode trick - see hardware note) ---
