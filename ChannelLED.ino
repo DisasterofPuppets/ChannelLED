@@ -14,14 +14,18 @@ Board: ESP32 Dev Module (Arduino IDE, ESP32 core v3.x).
 --- HARDWARE NOTE ---
 GPIO 21 on the P3 header drives the LCD backlight - don't use it for anything else.
 GPIO 35 (LEFT / -) is input-only with no internal pull-up - it needs the external 10k pull-up.
-Three connections are soldered straight to the ESP32-WROOM-32 module (not on any header):
-  - GROUND: top-right pin of the module, next to the antenna shield.
-  - GPIO 23 (3 LED Strip DIN), second from the top-right, beside ground.
+Up to three connections are soldered straight to the ESP32-WROOM-32 module (not on any header) -
+see .images/CYD_Soldering_Guide.png:
+  - GROUND:  top-right pin of the module, next to the antenna shield. OPTIONAL - same GND as the
+             CYD's power input; only used here as a thicker ground wire. Logo strip GND is best taken
+             straight from the buck / GND bus.
+  - GPIO 23 (case logo strip data): the pin directly below GROUND (2nd from the top, right side).
   - GPIO 25 (PWM out to the MOSFET's TRIG/PWM pin): 5th pin up from the bottom-left corner.
 Case logo backlight: a short WS2812 strip (3 LEDs, uncut), wired at its arrow-start (input) end:
   5V (buck OUT+) -> 1N4004 diode (stripe towards the strip) -> strip 5V   (~4.3V - the "diode trick")
-  GPIO 23 -> 330 ohm -> strip DIN   (SD card socket pin 3 (CMD) - keep the SD slot empty)
-  GND -> strip GND (shared with the CYD), plus 100-330uF 16V+ electrolytic across strip 5V / GND.
+  GPIO 23 (module pin, see above) -> 330 ohm -> strip DIN. GPIO 23 is also the SD card's data line,
+  so keep the SD slot empty.
+  GND -> strip GND (shared with the CYD) - take it straight from the buck / GND bus.
   The diode drops the strip supply so the ESP32's 3.3V data counts as a valid HIGH - no level shifter.
 See LOGO_* in DEFINES and VARIABLES. Touch is not used - GPIO 32 / 33 are free for outputs (25 = batten PWM).
 --------------------------------------------------------------------------------------------------
@@ -49,10 +53,17 @@ See LOGO_* in DEFINES and VARIABLES. Touch is not used - GPIO 32 / 33 are free f
   Role:  Coral house = Host   Cyan linked node = Client   Purple person = Standalone
 
 --- ANIMATIONS ---
-  None, Blink, Lightning, Strobe, Chase
-  Chase: every linked light goes dark, then each one fades 0 -> 50% -> 0 in turn - the Host first,
-         then each Client in name order (C_ConnectLED_01, _02 ...), then round again.
-         Speed sets how long each pulse lasts (Speed 1 = 2s, 50 = about 1.2s, 100 = 0.3s).
+  None, Blink, Strobe, Chase, Lightning Clone, Lightning Chase, Lightning Random
+  Speed slider = a ramp: far left = slowest, far right = fastest. Each animation has its own
+  slowest / fastest values in the SPEED_RAMP table (VARIABLES).
+  Chase:            every linked light goes dark, then each one fades 0 -> 50% -> 0 in turn - the Host
+                    first, then each Client in name order (C_ConnectLED_01, _02 ...), then round again.
+  Lightning Clone:  the Host makes a strike and every light plays the identical strike at the same time.
+  Lightning Chase:  the Host strikes, then (after the Speed delay) Client 1, then Client 2 ... round again.
+                    Every light gets its own random strike.
+  Lightning Random: after each gap, one light picked at random (Host or any Client) strikes.
+  Every strike is randomised: number of flashes, brightness of each flash, flicker timing, and the gap
+  before the next strike (LIGHTNING_* in VARIABLES). Standalone units just strike on their own.
 
 --- BUTTONS ---  LEFT = (-)   RIGHT = (+)   OK = Enter
   - / +                          -> move between items, or change a value while editing
@@ -97,6 +108,7 @@ Needs the "FastLED" library (3.9 or newer) from the Library Manager, for the cas
 #include <WiFi.h>         // Required for ESP-NOW - puts the radio in STA mode, no actual WiFi connection is made.
 #include <esp_now.h>      // ESP-NOW: multi-device sync between battens.
 #include <FastLED.h>      // Case logo WS2812 strip (install "FastLED" 3.9+ from the Library Manager)
+#include <esp_random.h>   // esp_random() - hardware random numbers for lightning strike seeds
 
 //------------------------------------------  DEFINES  --------------------------------------------
 
@@ -142,20 +154,18 @@ const unsigned long CLIENT_ROSTER_TIMEOUT_MS  = 7000;  // Host drops a Client fr
 
 // --- PWM config (ESP32 Arduino core v3.x API) ---
 #define LED_PWM_PIN     25  // Soldered direct to the module - see hardware note at top of file
-#define PWM_FREQ        20000   // Hz. default 5000 If the battens whine, 20000 (20kHz) moves it above hearing - XY-MOS rated to 20kHz
+#define PWM_FREQ        20000  // 20kHz - above hearing range (5kHz whines). XY-MOS modules are rated up to 20kHz
 #define PWM_RESOLUTION  8  // 0-255
 
 // --- Case logo backlight (WS2812 strip via the diode trick - see hardware note) ---
-#define LOGO_LED_PIN         23       // Strip DIN (via 330 ohm). SD socket pin 3 (CMD) - keep the SD slot empty
+#define LOGO_LED_PIN         23       // Strip DIN (via 330 ohm). Soldered to the module pin below GND - keep the SD slot empty
 #define LOGO_LED_COUNT       3        // LEDs on the strip piece - set to match if yours has more
 #define LOGO_LED_CHIPSET     WS2812B  // FastLED chipset name (e.g. WS2812B, SK6812)
 #define LOGO_COLOR_ORDER     GRB      // If red and green come out swapped, try RGB
 #define LOGO_UPDATE_MS       20       // How often the Breathe fade is recalculated (~50 steps a second)
 
 // --- Chase animation (each unit pulses in turn: Host first, then each Client in name order) ---
-#define CHASE_PEAK_PERCENT   50     // Brightness at the top of each pulse
-#define CHASE_STEP_SLOW_MS   2000   // Pulse length at Speed 1
-#define CHASE_STEP_FAST_MS   300    // Pulse length at Speed 100 (Speed 50 = about 1.2s)
+#define CHASE_PEAK_PERCENT   50     // Brightness at the top of each pulse (pulse length comes from SPEED_RAMP)
 
 // Set to 'true' to invert value adjustment direction when in sub-menus (brightness/speed).
 // If SUB_DIR is 'false', LEFT (-) will DECREASE values and RIGHT (+) will INCREASE values.
@@ -368,8 +378,37 @@ int currentSelection = 1;  // index of selected item - starts on Brightness
 bool itemActivated = false;  // whether the menu item is active or not
 
 
-enum AnimationType { NONE, BLINK, LIGHTNING, STROBE, CHASE };
-#define ANIM_COUNT 5                    // Number of entries in AnimationType - used to wrap the selector
+enum AnimationType { NONE, BLINK, STROBE, CHASE, LIGHTNING_CLONE, LIGHTNING_CHASE, LIGHTNING_RANDOM };
+#define ANIM_COUNT 7                    // Number of entries in AnimationType - used to wrap the selector
+
+// ===== SPEED SLIDER RAMP - change these to suit =====
+// The Speed slider runs from Speed 1 (far left) = slowMs to Speed 100 (far right) = fastMs, per animation.
+//   Blink / Strobe  : time on and time off
+//   Chase           : length of each pulse
+//   Lightning Clone : gap between strikes          Lightning Random : gap between strikes
+//   Lightning Chase : delay between each light
+// Order MUST match AnimationType above.
+struct SpeedRamp { unsigned long slowMs; unsigned long fastMs; };
+const SpeedRamp SPEED_RAMP[ANIM_COUNT] = {
+  {     0,    0 },   // NONE (no speed)
+  {  2000,  100 },   // BLINK
+  {   250,   20 },   // STROBE
+  {  3000,  300 },   // CHASE
+  { 30000, 1000 },   // LIGHTNING_CLONE
+  {  3000,  200 },   // LIGHTNING_CHASE
+  { 20000,  500 }    // LIGHTNING_RANDOM
+};
+
+// ===== LIGHTNING STRIKES - change these to suit =====
+// Every strike picks random values inside these ranges, so no two strikes look the same.
+const int LIGHTNING_FLASHES_MIN       = 2;    // Flashes per strike (min / max)
+const int LIGHTNING_FLASHES_MAX       = 8;
+const int LIGHTNING_INTENSITY_MIN     = 20;   // Each flash's brightness, % of the Brightness setting (min / max)
+const int LIGHTNING_INTENSITY_MAX     = 100;
+const int LIGHTNING_FLICKER_MIN_MS    = 20;   // Length of each flash and each dark flicker between flashes
+const int LIGHTNING_FLICKER_MAX_MS    = 120;
+const int LIGHTNING_GAP_JITTER_PCT    = 50;   // Speed gap is randomly varied by +/- this % so it never looks mechanical
+// ===== (end of animation settings) =====
 AnimationType currentAnimation = NONE; 
 int speedPercent = 50; // Default speed, though it will be greyed out initially
 int tempSpeed = 50; // temp speed while adjusting
@@ -382,13 +421,17 @@ unsigned long lastBlinkToggleTime = 0; // Timestamp of last blink state change
 bool strobeState = false; // Current state of the strobe (on/off)
 unsigned long lastStrobeToggleTime = 0; // Timestamp of last strobe state change
 
-// Lightning is a two-phase cycle: a dark WAITING gap, then a burst of random
-// flickers (FLASHING), then back to WAITING with a new random gap.
-enum LightningPhase { LIGHTNING_WAITING, LIGHTNING_FLASHING };
-LightningPhase lightningPhase = LIGHTNING_WAITING;
-unsigned long lightningNextEventTime = 0; // millis() timestamp of the next flicker/phase change
-int lightningFlashesRemaining = 0;        // Flickers left in the current strike
-bool lightningLedOn = false;              // Current on/off state of the LED during a strike
+// Lightning: a strike is a burst of random flashes, generated from a seed number. The same seed always
+// makes the same strike, so the Host only has to send the seed for every light to play it identically.
+bool strikeActive = false;                // This unit is mid-strike
+uint32_t strikeRng = 1;                   // Random generator state for the current strike
+int strikeFlashesLeft = 0;                // Flashes still to play in the current strike
+bool strikeFlashOn = false;               // LED currently lit by a flash
+unsigned long strikeNextEventTime = 0;    // millis() of the next flash on/off change
+volatile bool strikeRequested = false;    // The Host told this Client to strike - started from loop()
+volatile uint32_t strikeRequestSeed = 0;  // Seed for that strike
+unsigned long lightningNextStrikeTime = 0; // Host / solo: when the next strike (or next light's turn) is due
+int lightningTurn = 0;                    // Lightning Chase: 0 = this unit, 1.. = Clients in name order
 
 // Chase: the Host (or a unit on its own) runs the sequence; linked Clients wait to be told to pulse.
 volatile bool chasePulseRequested = false;   // The Host told this Client to pulse - started from loop()
@@ -443,7 +486,8 @@ enum EspNowMsgType : uint8_t {
   MSG_STATE_SYNC   = 1,  // Host pushes a changed state
   MSG_HOST_QUERY   = 2,  // "Is there a Host?"
   MSG_CLIENT_HELLO = 3,  // Client -> Host: "I'm here" (builds the Chase order)
-  MSG_CHASE_PULSE  = 4   // Host -> one Client: "your turn to pulse"
+  MSG_CHASE_PULSE  = 4,  // Host -> one Client: "your turn to pulse"
+  MSG_STRIKE       = 5   // Host -> one Client (or everyone if targetName is empty): "play this lightning strike"
 };
 typedef struct {
   EspNowMsgType msgType;
@@ -452,9 +496,10 @@ typedef struct {
   int brightnessPercent;    // Host state messages only
   AnimationType animation;  // Host state messages only
   int speedPercent;         // Host state messages only
-  char targetName[32];      // MSG_CHASE_PULSE: which Client should pulse
+  char targetName[32];      // MSG_CHASE_PULSE / MSG_STRIKE: which Client (empty = every Client, strikes only)
   uint16_t pulseMs;         // MSG_CHASE_PULSE: how long the pulse lasts
   uint8_t logoMode;         // Host state messages only: LogoMode (Off / Steady / Breathe)
+  uint32_t strikeSeed;      // MSG_STRIKE: seed that generates the strike's flashes
 } EspNowMessage;
 
 // The receive callback runs on the WiFi/LWIP task, not the main loop - TFT/SPI drawing isn't
@@ -1062,6 +1107,17 @@ void sendChasePulse(const char *target, unsigned long pulseMs) {
   sendEspNowMessage(msg);
 }
 
+// Host -> one Client (target name) or every Client (empty target): "play the strike made from this seed".
+void sendStrike(const char *target, uint32_t seed) {
+  EspNowMessage msg = {};
+  msg.msgType = MSG_STRIKE;
+  strncpy(msg.deviceName, myName, sizeof(msg.deviceName) - 1);
+  msg.isHost = true;
+  strncpy(msg.targetName, target, sizeof(msg.targetName) - 1);
+  msg.strikeSeed = seed;
+  sendEspNowMessage(msg);
+}
+
 // Listens for up to windowMs for any Host, asking every HOST_QUERY_INTERVAL_MS.
 // Keeps the LED animation running while it waits.
 bool searchForHost(unsigned long windowMs) {
@@ -1195,6 +1251,16 @@ void onEspNowReceive(const esp_now_recv_info_t *recvInfo, const uint8_t *incomin
       if (strcmp(msg.targetName, myName) == 0) { // Our turn - pulse from loop()
         chasePulseRequestMs = msg.pulseMs;
         chasePulseRequested = true;
+      }
+    }
+    return;
+  }
+  if (msg.msgType == MSG_STRIKE) {
+    if (deviceMode == MODE_CLIENT && hostMacKnown && memcmp(recvInfo->src_addr, hostMac, 6) == 0) {
+      lastHostContactTime = millis();
+      if (msg.targetName[0] == '\0' || strcmp(msg.targetName, myName) == 0) { // Everyone, or us - strike from loop()
+        strikeRequestSeed = msg.strikeSeed;
+        strikeRequested = true;
       }
     }
     return;
@@ -2193,7 +2259,9 @@ String getAnimName(AnimationType anim) {
   switch (anim) {
     case NONE:      return "None";
     case BLINK:     return "Blink";
-    case LIGHTNING: return "Lightning";
+    case LIGHTNING_CLONE:  return "Lightning Clone";
+    case LIGHTNING_CHASE:  return "Lightning Chase";
+    case LIGHTNING_RANDOM: return "Lightning Random";
     case STROBE:    return "Strobe";
     case CHASE:     return "Chase";
   }
@@ -2823,17 +2891,17 @@ void updateMenuItemDisplay(int itemIndex) {
 void runAnimations() {
   runLogo(millis());
   if (currentAnimation == BLINK) runBlinkAnimation();
-  else if (currentAnimation == LIGHTNING) runLightningAnimation();
   else if (currentAnimation == STROBE) runStrobeAnimation();
   else if (currentAnimation == CHASE) runChaseAnimation();
+  else if (isLightning(currentAnimation)) runLightningAnimation();
 }
 
 // Starts the given animation (anything except NONE - use stopCurrentAnimation() for that)
 void startAnimation(AnimationType anim) {
   if (anim == BLINK) startBlinkAnimation();
-  else if (anim == LIGHTNING) startLightningAnimation();
   else if (anim == STROBE) startStrobeAnimation();
   else if (anim == CHASE) startChaseAnimation();
+  else if (isLightning(anim)) startLightningAnimation(anim);
 }
 
 // Converts 0-100% brightness to 0-255 PWM value
@@ -2846,7 +2914,7 @@ void stopCurrentAnimation() {
   currentAnimation = NONE;
   blinkState = false;
   strobeState = false;
-  lightningPhase = LIGHTNING_WAITING;
+  strikeActive = false;
   chasePulseActive = false;
   ledcWrite(LED_PWM_PIN, brightnessToPWM(brightnessPercent));
 }
@@ -2866,10 +2934,16 @@ int getEffectiveSpeed() {
   return (itemActivated && currentSelection == 3) ? tempSpeed : speedPercent;
 }
 
+// Speed slider -> time for this animation: Speed 1 = SPEED_RAMP slowMs ... Speed 100 = fastMs
+unsigned long speedToMs(AnimationType anim) {
+  if ((int)anim <= 0 || (int)anim >= ANIM_COUNT) return 0;
+  return (unsigned long)map(constrain(getEffectiveSpeed(), 1, 100), 1, 100,
+                            (long)SPEED_RAMP[anim].slowMs, (long)SPEED_RAMP[anim].fastMs);
+}
+
 // Handles the logic for the Blink animation
 void runBlinkAnimation() {
-  // Higher speed % must give a SHORTER interval = faster blink.
-  unsigned long blinkInterval = map(getEffectiveSpeed(), 1, 100, 1000, 100); // 1000ms slow to 100ms fast
+  unsigned long blinkInterval = speedToMs(BLINK); // Slider ramp - see SPEED_RAMP
 
   if (millis() - lastBlinkToggleTime >= blinkInterval) {
     lastBlinkToggleTime = millis();
@@ -2889,7 +2963,7 @@ void startStrobeAnimation() {
 // Same on/off toggle pattern as Blink, but a much faster interval range so it
 // reads as a distinct, punchier effect rather than a fast blink.
 void runStrobeAnimation() {
-  unsigned long strobeInterval = map(getEffectiveSpeed(), 1, 100, 200, 20); // 200ms slow to 20ms fast
+  unsigned long strobeInterval = speedToMs(STROBE); // Slider ramp - see SPEED_RAMP
 
   if (millis() - lastStrobeToggleTime >= strobeInterval) {
     lastStrobeToggleTime = millis();
@@ -2898,41 +2972,103 @@ void runStrobeAnimation() {
   }
 }
 
-// Starts the lightning animation
-void startLightningAnimation() {
-  currentAnimation = LIGHTNING;
-  lightningPhase = LIGHTNING_WAITING;
-  lightningLedOn = false;
-  ledcWrite(LED_PWM_PIN, 0); // Start dark, waiting for the first strike
-  lightningNextEventTime = millis() + random(500, 3000);
+// --- Lightning (Clone / Chase / Random) ---
+// The Host (or a unit on its own) decides when and where strikes happen; a linked Client only plays
+// the strikes the Host sends it. A strike is generated from a seed, so the same seed = the same strike.
+
+bool isLightning(AnimationType anim) {
+  return anim == LIGHTNING_CLONE || anim == LIGHTNING_CHASE || anim == LIGHTNING_RANDOM;
 }
 
-// Random dark gaps (WAITING) followed by a burst of irregular on/off flickers (FLASHING) to
-// mimic a real lightning strike. Non-blocking - uses millis() timestamps, no delay().
-// ESP32's random() is seeded from the hardware RNG automatically.
+// Small fast random generator (xorshift32) - deterministic per seed, so every light given the same
+// seed plays exactly the same strike.
+uint32_t strikeNext() {
+  strikeRng ^= strikeRng << 13;
+  strikeRng ^= strikeRng >> 17;
+  strikeRng ^= strikeRng << 5;
+  return strikeRng;
+}
+int strikeRange(int lo, int hi) { // Random int lo..hi (inclusive) from the strike generator
+  return (hi <= lo) ? lo : lo + (int)(strikeNext() % (uint32_t)(hi - lo + 1));
+}
+
+// Starts playing the strike made from seed on this unit's battens
+void startStrike(uint32_t seed) {
+  strikeRng = seed ? seed : 1; // xorshift must never be 0
+  strikeFlashesLeft = strikeRange(LIGHTNING_FLASHES_MIN, LIGHTNING_FLASHES_MAX);
+  strikeFlashOn = false;
+  strikeActive = true;
+  strikeNextEventTime = millis(); // First flash straight away
+}
+
+// Steps the current strike: flash on at a random intensity, then dark, until no flashes are left
+void runStrike(unsigned long now) {
+  if (!strikeActive || (long)(now - strikeNextEventTime) < 0) return;
+  if (!strikeFlashOn) {
+    if (strikeFlashesLeft <= 0) { // Strike finished
+      strikeActive = false;
+      ledcWrite(LED_PWM_PIN, 0);
+      return;
+    }
+    int pct = (brightnessPercent * strikeRange(LIGHTNING_INTENSITY_MIN, LIGHTNING_INTENSITY_MAX)) / 100;
+    ledcWrite(LED_PWM_PIN, brightnessToPWM(pct));
+    strikeFlashOn = true;
+  } else {
+    ledcWrite(LED_PWM_PIN, 0);
+    strikeFlashOn = false;
+    strikeFlashesLeft--;
+  }
+  strikeNextEventTime = now + strikeRange(LIGHTNING_FLICKER_MIN_MS, LIGHTNING_FLICKER_MAX_MS);
+}
+
+// Speed gap with a random +/- LIGHTNING_GAP_JITTER_PCT wobble (never under 50ms)
+unsigned long lightningGapMs() {
+  long base = (long)speedToMs(currentAnimation);
+  long jitter = random(-LIGHTNING_GAP_JITTER_PCT, LIGHTNING_GAP_JITTER_PCT + 1);
+  return (unsigned long)max(50L, base + (base * jitter) / 100);
+}
+
+void startLightningAnimation(AnimationType anim) {
+  currentAnimation = anim;
+  strikeActive = false;
+  strikeRequested = false;
+  lightningTurn = 0;
+  ledcWrite(LED_PWM_PIN, 0);                  // Start dark
+  lightningNextStrikeTime = millis() + 500;   // First strike shortly after selecting
+}
+
 void runLightningAnimation() {
   unsigned long now = millis();
-  if (now < lightningNextEventTime) return;
+  bool follower = (deviceMode == MODE_CLIENT && clientLinked);
 
-  if (lightningPhase == LIGHTNING_WAITING) {
-    lightningPhase = LIGHTNING_FLASHING;
-    lightningFlashesRemaining = random(3, 8); // 3-7 flickers per strike
-    lightningLedOn = true;
-    ledcWrite(LED_PWM_PIN, brightnessToPWM(brightnessPercent));
-    lightningNextEventTime = now + random(20, 80);
-  } else { // LIGHTNING_FLASHING
-    lightningLedOn = !lightningLedOn;
-    ledcWrite(LED_PWM_PIN, lightningLedOn ? brightnessToPWM(brightnessPercent) : 0);
-    lightningFlashesRemaining--;
-
-    if (lightningFlashesRemaining <= 0) {
-      lightningPhase = LIGHTNING_WAITING;
-      ledcWrite(LED_PWM_PIN, 0);
-      lightningNextEventTime = now + random(500, 3000);
-    } else {
-      lightningNextEventTime = now + random(20, 80);
+  if (follower) {
+    // Linked Client: only strikes when the Host says so
+    if (strikeRequested) {
+      strikeRequested = false;
+      startStrike(strikeRequestSeed);
     }
+  } else if ((long)(now - lightningNextStrikeTime) >= 0) {
+    // Host, Standalone, or a Client that's lost its Host: decide the next strike
+    int clients = (deviceMode == MODE_HOST) ? buildChaseOrder() : 0;
+    uint32_t seed = esp_random();
+
+    if (currentAnimation == LIGHTNING_CLONE) {
+      if (clients > 0) sendStrike("", seed);  // Every Client plays the same seed...
+      startStrike(seed);                      // ...at the same moment as us
+    } else if (currentAnimation == LIGHTNING_CHASE) {
+      if (lightningTurn > clients) lightningTurn = 0;             // A Client dropped out - start from the top
+      if (lightningTurn == 0) startStrike(seed);                  // Our turn
+      else sendStrike(chaseOrder[lightningTurn - 1].name, seed);  // A Client's turn, its own random strike
+      lightningTurn = (lightningTurn + 1) % (clients + 1);
+    } else { // LIGHTNING_RANDOM
+      int pick = random(0, clients + 1);                          // 0 = us, 1.. = a Client
+      if (pick == 0) startStrike(seed);
+      else sendStrike(chaseOrder[pick - 1].name, seed);
+    }
+    lightningNextStrikeTime = now + lightningGapMs();
   }
+
+  runStrike(now);
 }
 
 // --- Chase ---
@@ -2942,7 +3078,7 @@ void runLightningAnimation() {
 
 // Pulse length for the current Speed (higher speed = shorter pulse)
 unsigned long chaseStepMs() {
-  return map(getEffectiveSpeed(), 1, 100, CHASE_STEP_SLOW_MS, CHASE_STEP_FAST_MS);
+  return speedToMs(CHASE); // Slider ramp - see SPEED_RAMP
 }
 
 void startChaseAnimation() {
